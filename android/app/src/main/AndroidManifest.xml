@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PrintTheShot Android 清单 / PrintTheShot Android manifest
+  ============================================================================
+  中文
+  ====
+  这是一份**叠加用的清单**:把它复制进 `npx cap add android` 生成的原生工程
+  (`<项目根>/android/app/src/main/AndroidManifest.xml`)覆盖同名文件即可。
+  它 = Capacitor 生成的默认内容 + 下面这些打印相关的补充:
+
+    - 蓝牙权限(经典 SPP 打印用)
+    - 前台服务 + dataSync 类型(后台保活用)
+    - 通知权限(前台服务的常驻通知用)
+    - 明文本地网络访问(访问局域网里的 PrintTheShot HTTP 服务端)
+
+  依赖两点,生成工程里都有,不要删:
+    - `@style/AppTheme.NoActionBarLaunch`(生成工程的 res/values/styles.xml)
+    - `@xml/file_paths`(本目录下带的那份,和 FileProvider 配对)
+
+  English
+  =======
+  This is an **overlay** manifest: copy it over the one that
+  `npx cap add android` generates (at
+  `<project root>/android/app/src/main/AndroidManifest.xml`). It is the default
+  Capacitor content plus the printing-specific additions:
+
+    - Bluetooth permissions (classic SPP printing)
+    - Foreground service with the dataSync type (background keep-alive)
+    - Notification permission (for the service's persistent notification)
+    - Cleartext LAN access (to reach the PrintTheShot HTTP service on the LAN)
+
+  Two references come from the generated project; keep them:
+    - `@style/AppTheme.NoActionBarLaunch` (res/values/styles.xml)
+    - `@xml/file_paths` (shipped alongside this file, paired with FileProvider)
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      蓝牙 / Bluetooth
+      ==================================================================
+      Android 11 (API 30) 及以下:BLUETOOTH / BLUETOOTH_ADMIN 是安装时权限。
+      Android 12 (API 31) 起换成 BLUETOOTH_CONNECT / BLUETOOTH_SCAN,必须运行时申请
+      (见 PrintTheShotPrinterPlugin.requestPermissions)。
+      两组都要声明,并用 maxSdkVersion 把老权限限制在 API 30 及以下,免得新系统上
+      出现「声明了却没被授予」的困惑。
+      Android 11 (API 30) and below: BLUETOOTH / BLUETOOTH_ADMIN are install-time
+      permissions. From Android 12 (API 31) they are replaced by
+      BLUETOOTH_CONNECT / BLUETOOTH_SCAN, which must be requested at runtime
+      (see PrintTheShotPrinterPlugin.requestPermissions). Both sets are declared,
+      with maxSdkVersion capping the old pair at API 30 so nothing looks
+      "declared but never granted" on newer systems.
+
+      neverForLocation:本 App 只用已配对的设备,不做蓝牙扫描,也不从扫描结果推断
+      位置,所以可以声明这一条,从而不需要定位权限。
+      neverForLocation: this app only uses bonded devices, never scans, and never
+      derives location from scan results, so this flag applies and no location
+      permission is needed.
+    -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+
+    <!--
+      网络 / network
+      ==================================================================
+      WebView 加载本地资源、以及访问局域网里的 PrintTheShot 服务端都要网络权限。
+      Required both for the WebView's local assets and for reaching the
+      PrintTheShot service on the LAN.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      前台服务保活 / foreground service keep-alive
+      ==================================================================
+      FOREGROUND_SERVICE 是基础权限;FOREGROUND_SERVICE_DATA_SYNC 是 Android 14
+      (API 34) 起为 dataSync 类型单独要的权限 —— 打印属于「在本机与外部设备之间
+      搬运数据」,对应 dataSync。两个都要,少一个在 API 34 上会直接抛异常。
+      FOREGROUND_SERVICE is the base permission; FOREGROUND_SERVICE_DATA_SYNC is
+      the extra one Android 14 (API 34) requires for the dataSync type —
+      printing is "moving data between the device and an external device", i.e.
+      dataSync. Both are required; missing one throws on API 34.
+
+      POST_NOTIFICATIONS 是 Android 13 (API 33) 起发通知要的用户同意,前台服务的
+      常驻通知需要它。用户拒绝只影响通知显示,不影响打印。
+      POST_NOTIFICATIONS is the user consent Android 13 (API 33) requires to post
+      notifications, needed for the service's persistent notification.
+      Declining it only hides the notification; printing still works.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+      没有蓝牙的设备也能装(比如用 HTTP 桥 + 服务端打印的场景)/
+      installable on devices without Bluetooth (e.g. server-side printing only)
+    -->
+    <uses-feature
+        android:name="android.hardware.bluetooth"
+        android:required="false" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:usesCleartextTraffic="true">
+
+        <!--
+          usesCleartextTraffic 与 networkSecurityConfig 说的都是「允许明文 HTTP」:
+          Web UI 要访问局域网里的 http://<电脑IP>:8000。API 24 起 networkSecurityConfig
+          优先,所以两边都写成允许,行为才一致(见 res/xml/network_security_config.xml,
+          那里也是以后想收紧安全策略的入口)。
+          Both usesCleartextTraffic and networkSecurityConfig say "cleartext HTTP is
+          allowed": the web UI talks to http://<host>:8000 on the LAN. From API 24
+          the network security config wins, so both are set to allow for
+          consistent behaviour — see res/xml/network_security_config.xml, which is
+          also where you would tighten this later.
+        -->
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTask"
+            android:theme="@style/AppTheme.NoActionBarLaunch">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          打印前台服务 / the printing foreground service
+          ==================================================================
+          exported="false":只给本 App 用,别的应用起不了它。
+          foregroundServiceType="dataSync":Android 14 (API 34) 起前台服务必须声明
+          类型,漏了会在 startForeground 时抛 MissingForegroundServiceTypeException。
+          exported="false" because only this app starts it;
+          foregroundServiceType="dataSync" because from Android 14 (API 34) a
+          foreground service must declare its type or startForeground throws
+          MissingForegroundServiceTypeException.
+        -->
+        <service
+            android:name="com.printtheshot.printer.PrinterService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!--
+          FileProvider:Capacitor 生成工程里自带,留着以免以后加分享/相机类插件时
+          才发现被删了。不需要的话可以连同 res/xml/file_paths.xml 一起删掉。
+          FileProvider: part of the generated project; kept so that adding a share
+          or camera plugin later does not fail. Safe to remove together with
+          res/xml/file_paths.xml if unused.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+    </application>
+
+</manifest>

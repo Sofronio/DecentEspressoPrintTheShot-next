@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<!--
+  PrintTheShot — 主界面集成测试 / Main UI integration test
+  =========================================================
+  中文
+  ----
+  在同源 iframe 里加载真实的 Web UI(`/`),然后检查它是不是真的画出了东西:
+  缩略图 canvas 有没有内容、统计卡片有没有填充、打印设置卡片有没有渲染出平台信息。
+
+  这样测的是「用户打开页面会看到什么」,而不是某个孤立函数的返回值 —— 页面里
+  任何一处抛异常导致后续初始化中断,这里都会暴露出来。
+
+  跑法(服务端需在 8780 端口):
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+      --headless=new --disable-gpu --virtual-time-budget=25000 \
+      --dump-dom "http://localhost:8780/tests/ui_test.html"
+
+  English
+  -------
+  Loads the real web UI (`/`) in a same-origin iframe and checks it actually drew
+  something: whether the thumbnail canvases have content, whether the stats cards
+  filled in, whether the print settings card rendered platform info.
+
+  That tests what a user sees when they open the page, rather than an isolated
+  function's return value — any exception in the page that breaks later
+  initialisation shows up here.
+
+  Run (with the server on port 8780):
+    ... --dump-dom "http://localhost:8780/tests/ui_test.html"
+-->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>UI test / 界面测试</title>
+<style>
+  @font-face {
+    font-family: 'NotoSansCJKsc';
+    src: url('../web/fonts/NotoSansCJKsc-Regular.otf') format('opentype');
+    font-display: swap;
+  }
+  body { font-family: "NotoSansCJKsc", monospace; padding: 16px; font-size: 13px; }
+  .pass { color: #070; } .fail { color: #c00; font-weight: bold; }
+  #frame { width: 1200px; height: 900px; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<h1>UI integration test</h1>
+<div id="results"></div>
+<iframe id="frame" src="/"></iframe>
+
+<script>
+(function () {
+  'use strict';
+  var out = document.getElementById('results');
+  var results = [], passed = 0, failed = 0;
+
+  function check(name, cond, detail) {
+    var ok = !!cond;
+    if (ok) passed++; else failed++;
+    results.push({ name: name, ok: ok, detail: detail === undefined ? '' : String(detail) });
+    var d = document.createElement('div');
+    d.className = ok ? 'pass' : 'fail';
+    d.textContent = (ok ? 'PASS ' : 'FAIL ') + name + (detail !== undefined ? '  [' + detail + ']' : '');
+    out.appendChild(d);
+  }
+
+  function summary() {
+    var pre = document.createElement('pre');
+    pre.id = 'JSON';
+    pre.textContent = JSON.stringify({ passed: passed, failed: failed, results: results });
+    document.body.appendChild(pre);
+  }
+
+  /**
+   * 数一张 canvas 上有多少「墨」(黑且不透明)。
+   *
+   * 必须一起看 alpha:一张从没画过的 canvas 读出来是 (0,0,0,0),只看 RGB 会把
+   * 它算成 100% 黑 —— 那样「画了」和「没画」永远分不出来,断言就白写了。
+   *
+   * Count how much "ink" (black AND opaque) a canvas holds.
+   *
+   * Alpha has to be part of this: a canvas that was never drawn reads back as
+   * (0,0,0,0), and looking only at RGB scores it as 100% black — which makes
+   * "drawn" and "never drawn" indistinguishable and the assertion worthless.
+   */
+  function inkRatio(canvas) {
+    try {
+      var d = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+      var dark = 0;
+      for (var i = 0; i < d.length; i += 4) {
+        if (d[i + 3] > 200 && d[i] < 128) dark++;
+      }
+      return dark / (canvas.width * canvas.height);
+    } catch (e) { return -1; }
+  }
+
+  /** canvas 是否被画过:白色背景必须已经铺上 / whether the canvas was drawn at all. */
+  function isPainted(canvas) {
+    try {
+      var d = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+      var opaque = 0;
+      for (var i = 3; i < d.length; i += 4) if (d[i] > 200) opaque++;
+      return opaque / (canvas.width * canvas.height) > 0.9;
+    } catch (e) { return false; }
+  }
+
+  var frame = document.getElementById('frame');
+
+  // 不用 iframe 的 onload:它在无头虚拟时钟下不总是可靠触发。改成轮询等界面真正
+  // 就绪 —— 状态卡片被填上了,说明页面里的 refreshAll() 已经跑完。
+  //
+  // Not iframe.onload: it does not reliably fire under a headless virtual clock.
+  // Poll instead until the UI is genuinely ready — a populated status card proves
+  // the page's refreshAll() has finished.
+  var waited = 0;
+  (function waitReady() {
+    if (waited > 25000) { runChecks(); return; }
+    waited += 250;
+    var ok = false;
+    try {
+      var d = frame.contentDocument;
+      var w = frame.contentWindow;
+      ok = !!(d && w && w.PrintTheShotRender && w.PrintTheShotPrinter && w.L &&
+              d.getElementById('status-grid') && d.getElementById('status-grid').children.length >= 6 &&
+              d.getElementById('print-card') && d.getElementById('print-card').children.length > 0);
+    } catch (e) { ok = false; }
+    if (ok) setTimeout(runChecks, 1500);   // 再给缩略图一点绘制时间 / let thumbnails finish
+    else setTimeout(waitReady, 250);
+  })();
+
+  async function runChecks() {
+    var doc, win;
+    try {
+      doc = frame.contentDocument;
+      win = frame.contentWindow;
+    } catch (e) {
+      check('iframe is same-origin', false, e.message);
+      summary(); return;
+    }
+    check('iframe is same-origin', !!doc && !!win);
+
+    // 页面里的脚本有没有报错 / did the page's scripts throw?
+    var errs = win.__pageErrors || [];
+    check('no uncaught page errors', errs.length === 0, errs.slice(0, 2).join(' | '));
+
+    check('render.js is loaded in the page', !!win.PrintTheShotRender);
+    check('printer.js is loaded in the page', !!win.PrintTheShotPrinter);
+
+    // app.js 用的是顶层 const L,而顶层 const 不会变成 window 的属性,所以
+    // 必须让 iframe 自己 eval,不能读 win.L。
+    // app.js declares `const L` at top level, and a top-level const never becomes a
+    // window property — so the iframe has to eval it; reading win.L cannot work.
+    var pageL = null;
+    try { pageL = win.eval('typeof L !== "undefined" ? L : null'); } catch (e) { }
+    check('language table was substituted',
+      !!pageL && pageL.status_running && pageL.status_running !== 'status_running',
+      pageL ? pageL.status_running : 'no L');
+    check('language table carries the new print strings',
+      !!(pageL && pageL.print_platform && pageL.h_print),
+      pageL ? (pageL.print_platform + '/' + pageL.h_print) : 'no L');
+
+    // 状态卡片 / status card
+    var statusGrid = doc.getElementById('status-grid');
+    check('status card rendered', statusGrid && statusGrid.children.length >= 6,
+      statusGrid ? statusGrid.children.length + ' items' : 'missing');
+
+    // 打印设置卡片 / print settings card
+    var printCard = doc.getElementById('print-card');
+    check('print settings card rendered', printCard && printCard.children.length >= 4,
+      printCard ? printCard.children.length + ' items' : 'missing');
+    check('print settings shows the platform',
+      printCard && /mac|win|linux|android/i.test(printCard.textContent),
+      printCard ? printCard.textContent.slice(0, 60) : '');
+    check('printer dropdown exists', !!doc.getElementById('printer-select'));
+    check('mode dropdown exists', !!doc.getElementById('print-mode'));
+    check('width dropdown exists', !!doc.getElementById('print-width'));
+
+    // 数据卡片:缩略图 / data cards: thumbnails
+    var thumbs = doc.querySelectorAll('canvas.thumb');
+    check('thumbnail canvases rendered', thumbs.length > 0, thumbs.length + ' thumbs');
+
+    // 缩略图是懒加载的(滚到才画),所以要先把它们滚进视口,再等一轮绘制。
+    // 顺带也就验证了懒加载本身是工作的:滚之前不该有内容。
+    //
+    // Thumbnails are lazy (drawn on scroll), so scroll them into view and give the
+    // renderer a turn. That also verifies the lazy loading itself: before the
+    // scroll there must be nothing there.
+    var beforeScroll = 0;
+    for (var b = 0; b < thumbs.length; b++) if (isPainted(thumbs[b])) beforeScroll++;
+    check('thumbnails are lazy (blank before scrolling)', beforeScroll === 0,
+      beforeScroll + '/' + thumbs.length + ' already painted');
+
+    var gridEl = doc.getElementById('shot-grid');
+    if (gridEl && gridEl.scrollIntoView) gridEl.scrollIntoView();
+    await new Promise(function (r) { setTimeout(r, 3000); });
+
+    // 至少一张缩略图真的画上了东西 —— 这是「Canvas 绘制接进了真实界面」的证据
+    // At least one thumbnail must actually have ink: proof that Canvas rendering is
+    // wired into the real UI, not just working in isolation.
+    var drawn = 0, painted = 0, bestRatio = 0;
+    for (var i = 0; i < thumbs.length; i++) {
+      if (isPainted(thumbs[i])) painted++;
+      var r = inkRatio(thumbs[i]);
+      if (r > 0.005) drawn++;
+      if (r > bestRatio) bestRatio = r;
+    }
+    check('every thumbnail has a painted background', painted === thumbs.length,
+      painted + '/' + thumbs.length);
+    check('at least one thumbnail has ink', drawn > 0,
+      drawn + '/' + thumbs.length + ' drawn, best=' + (bestRatio * 100).toFixed(2) + '%');
+    check('thumbnail ink ratio is plausible (0.5%..40%)',
+      bestRatio > 0.005 && bestRatio < 0.4, (bestRatio * 100).toFixed(2) + '%');
+
+    // 服务端不应再提供 PNG / the server must no longer serve PNGs
+    try {
+      var r404 = await fetch('/images/does_not_exist.png');
+      check('server no longer serves /images/*.png',
+        r404.status === 404 || r404.status === 501 || r404.status === 500,
+        'status=' + r404.status);
+    } catch (e) { check('server no longer serves /images/*.png', false, e.message); }
+
+    // 页面里不应该还有指向 /images/ 的引用 / no /images/ references should remain
+    var html = doc.documentElement.outerHTML;
+    check('no /images/ references left in the page', html.indexOf('/images/') < 0);
+
+    // 打印按钮存在 / the print action exists
+    var grid = doc.getElementById('shot-grid');
+    check('shot cards have a print button',
+      !!grid && grid.querySelectorAll('button[onclick^="printShot"]').length > 0,
+      grid ? grid.querySelectorAll('button').length + ' buttons' : 'no grid');
+
+    // 大图是 canvas / the large view is a canvas
+    var lb = doc.getElementById('lightbox-canvas');
+    check('lightbox uses a canvas', !!lb, lb ? (lb.width + 'x' + lb.height) : 'missing');
+
+    // 自动打印轮询有没有起来 / is the auto-print poll running?
+    check('auto-print loop started', typeof win.PrintTheShotPrinter.pumpQueue === 'function');
+
+    summary();
+  }
+})();
+</script>
+</body>
+</html>

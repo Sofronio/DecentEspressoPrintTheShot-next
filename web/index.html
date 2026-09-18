@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PrintTheShot Next v{{VERSION}}</title>
+<!-- 用相对路径:浏览器里页面挂在 /,APK 里页面在资源根目录 —— 两种情况下
+     相对路径都指向同一批文件,绝对路径则只会在其中一个环境里对。
+     服务端为此把 web/ 的资源同时挂在根路径上(见 ROOT_ASSETS)。
+     Relative paths: in a browser the page is at /, inside the APK it sits at the
+     root of the assets — relative paths point at the right files in both, whereas
+     absolute ones can only be right in one. The server mounts web/ at the root as
+     well for exactly this reason (see ROOT_ASSETS). -->
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div>
+    <h1 id="title">PrintTheShot Next</h1>
+    <div class="sub" id="subtitle"></div>
+  </div>
+  <div class="lang-switch" id="lang-switch"></div>
+  <button class="btn gray" id="btn-settings" onclick="showSettings()" title="⚙" style="margin-left:10px">⚙</button>
+</header>
+
+<main>
+<div id="main-view">
+  <!-- 状态 / Status -->
+  <div class="card">
+    <h2 id="h-status"></h2>
+    <div class="status-grid" id="status-grid"></div>
+    <div style="margin-top:16px">
+      <button class="btn green" id="btn-print" onclick="togglePrint()"></button>
+      <button class="btn" id="btn-bean" onclick="toggleBean()"></button>
+      <button class="btn gray" onclick="refreshAll()" id="btn-refresh"></button>
+    </div>
+  </div>
+
+  <!-- 打印平台与设置 / Print platform & settings -->
+  <!-- 这一端(Mac 浏览器 / Android WebView)就是负责画图和打印的那一端 -->
+  <!-- This end (a macOS browser or an Android WebView) is the one that draws and prints -->
+  <div class="card">
+    <h2 id="h-print"></h2>
+    <div class="status-grid" id="print-card"></div>
+  </div>
+
+  <!-- 蓝牙打印机(仅 Android 显示)/ Bluetooth printer (Android only) -->
+  <!-- 桌面浏览器里这一整张卡片会被 bt.js 隐藏 —— 那里没有蓝牙打印这回事 -->
+  <!-- bt.js hides this card entirely in a desktop browser: no Bluetooth there -->
+  <div class="card" id="bt-card" style="display:none"></div>
+
+  <!-- 打印队列 / Print queue -->
+  <div class="card">
+    <h2><span id="h-queue"></span><button class="btn red" onclick="clearQueue()" id="btn-clear"></button></h2>
+    <div id="queue-list"></div>
+  </div>
+
+  <!-- 上传 / Upload -->
+  <div class="card">
+    <h2 id="h-upload"></h2>
+    <div class="dropzone" id="dropzone" onclick="document.getElementById('drop-file').click()"></div>
+    <input type="file" id="drop-file" accept=".json,application/json">
+  </div>
+
+  <!-- 最近数据(日期 + 翻页,历史持久化) / Recent data (date filter + pagination, persisted) -->
+  <div class="card">
+    <h2><span id="h-recent"></span></h2>
+    <div class="list-bar">
+      <select id="page-size" onchange="setPageSize()"></select>
+      <span class="date-nav">
+        <button class="btn gray" id="btn-prev" onclick="shiftDate(-1)" title="">◀</button>
+        <select id="date-filter" onchange="loadShots()"></select>
+        <button class="btn gray" id="btn-next" onclick="shiftDate(1)" title="">▶</button>
+      </span>
+      <span class="pager">
+        <button class="btn gray" id="btn-page-prev" onclick="shiftPage(-1)">◀</button>
+        <span id="page-info"></span>
+        <button class="btn gray" id="btn-page-next" onclick="shiftPage(1)">▶</button>
+      </span>
+    </div>
+    <div class="shot-grid" id="shot-grid"></div>
+  </div>
+
+  <!-- 统计数据 / Statistics -->
+  <div class="card">
+    <h2 id="h-stats"></h2>
+    <div class="stats-row" id="stats-grid"></div>
+    <div style="margin-top:14px" id="stats-bars"></div>
+  </div>
+
+  <!-- 插件下载 / plugin download -->
+  <div class="card">
+    <h2 id="h-plugin"></h2>
+    <p>
+      <a class="btn" href="./plugin/plugin.tcl" download id="btn-plugin"></a>
+      <a class="btn gray" href="https://github.com/Sofronio/DecentEspressoPrintTheShot/releases" target="_blank" rel="noopener" id="btn-plugin-github"></a>
+      <a class="btn gray" href="./plugin/plugin.tcl.txt" download="tcl.txt" id="btn-plugin-txt"></a>
+    </p>
+    <div class="note" id="plugin-note"></div>
+    <ol class="steps">
+      <li id="step1"></li>
+      <li><code id="step2"></code></li>
+      <li id="step3"></li>
+      <li id="step4"></li>
+    </ol>
+  </div>
+
+  <!-- 服务更新 / service update -->
+  <div class="card">
+    <h2 id="h-update"></h2>
+    <p>
+      <button class="btn" id="btn-check-update" onclick="checkUpdate()"></button>
+      <button class="btn red" id="btn-update-service" onclick="updateService()" disabled></button>
+    </p>
+    <div class="note" id="update-note"></div>
+  </div>
+</div><!-- /main-view -->
+
+<!-- 设置二级页 / Settings sub-page -->
+<div id="settings-view" style="display:none">
+  <div class="card">
+    <h2><span id="h-ai-settings"></span><button class="btn gray" id="btn-back" onclick="hideSettings()">←</button></h2>
+    <div class="ai-row">
+      <input type="password" id="ai-key" placeholder="sk-..." autocomplete="off">
+      <button class="btn" id="btn-save-key" onclick="saveAiKey()"></button>
+      <button class="btn gray" id="btn-ai-balance" onclick="checkBalance()"></button>
+      <span id="ai-balance" style="font-size:13px;color:var(--muted)"></span>
+    </div>
+    <div class="ai-row">
+      <label><input type="checkbox" id="ai-enabled" onchange="toggleAi()">
+        <span id="ai-enabled-label" style="font-size:13px;color:#555"></span></label>
+    </div>
+    <div class="ai-row" style="flex-wrap:wrap">
+      <span id="h-languages" style="font-size:13px;color:#555"></span>
+      <span id="lang-list" style="display:flex;gap:6px;flex-wrap:wrap"></span>
+    </div>
+    <div class="ai-row">
+      <input id="lang-name" placeholder="日本語 / Japanese / 日语">
+      <button class="btn" id="btn-add-lang" onclick="addLanguage()"></button>
+    </div>
+    <div class="ai-row" style="flex-wrap:wrap" id="lang-presets"></div>
+    <div class="note" id="ai-note"></div>
+  </div>
+</div>
+</main>
+
+<!-- 大图查看(带操作栏) / large image view with actions -->
+<!-- 这里也是 canvas:图是前端现画的,服务端不提供 PNG -->
+<!-- A canvas here too: the chart is drawn on the fly; the server serves no PNG -->
+<div class="lightbox" id="lightbox" onclick="if(event.target===this)closeLightbox()">
+  <span class="close">✕</span>
+  <div class="lb-wrap" onclick="event.stopPropagation()">
+    <canvas id="lightbox-canvas" width="1296" height="576" alt="large chart"></canvas>
+    <div class="lb-langs" id="lb-langs" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+    <div class="lb-actions">
+      <button class="btn" id="lb-print" onclick="printLightbox()" title="🖨️">🖨️</button>
+      <a class="btn gray" id="lb-json" download title="JSON">📄</a>
+      <button class="btn gray" onclick="downloadShotPng(lightboxFilename)" title="PNG">🖼️</button>
+      <button class="btn gray" onclick="translateShot(lightboxFilename)" title="🌐">🌐</button>
+    </div>
+  </div>
+</div>
+
+<!-- 翻译语言选择 / translate language picker -->
+<div class="lightbox" id="translate-modal" onclick="if(event.target===this)closeTranslateModal()">
+  <div class="lb-wrap t-modal" onclick="event.stopPropagation()">
+    <h3 id="t-title" style="margin-bottom:12px;color:#333"></h3>
+    <select id="t-lang" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px"></select>
+    <input id="t-lang-custom" placeholder="..." style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box">
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn" id="t-go" onclick="doTranslate()"></button>
+      <button class="btn gray" onclick="closeTranslateModal()">✕</button>
+    </div>
+    <div class="note" id="t-note" style="margin-top:8px"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- 自带文案表:必须最先加载,app.js 在解析阶段就要用它 --
+     Bundled strings: must load first, app.js needs it while parsing -->
+<script src="strings.js"></script>
+<script src="render.js"></script>
+<script src="printer.js"></script>
+<script src="bt.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

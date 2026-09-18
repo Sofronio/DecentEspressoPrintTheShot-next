@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PrintTheShot — 应用名与界面文案 / app name and UI strings
+  =========================================================
+
+  中文
+  ====
+  桌面上显示的应用名来自 @string/app_name。`npx cap add android` 生成的工程里
+  也有一份 strings.xml,但内容是 Capacitor 按 capacitor.config.json 的 appName
+  写进去的 —— 这里显式再声明一次,好处是应用名不依赖生成时机:
+
+    - 先跑 cap add、后来才改 appName,生成工程里还是旧名字;
+    - 这份文件跟着仓库走,clone 下来名字就是对的。
+
+  资源合并时同名条目以本目录(app/src/main)为准,会覆盖生成工程里的值。
+
+  English
+  =======
+  The name shown on the launcher comes from @string/app_name. The project produced
+  by `npx cap add android` has its own strings.xml, but its contents are whatever
+  Capacitor wrote from appName at generation time. Declaring it here as well means
+  the name does not depend on when generation happened:
+
+    - run cap add first, change appName later, and the generated project still
+      carries the old name;
+    - this file travels with the repository, so a fresh clone has the right name.
+
+  During resource merging, entries in this directory (app/src/main) win over the
+  generated project's values.
+-->
+<resources>
+    <string name="app_name">PrintTheShotNext</string>
+</resources>

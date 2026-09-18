@@ -1,0 +1,49 @@
+# 运行时数据 / runtime data
+shots_data/
+
+# 构建产物 / build output
+dist/
+build/
+.build_venv/
+__pycache__/
+*.pyc
+*.spec.bak
+
+# 更新备份 / update backups
+backup/
+
+# 本机设置与翻译缓存 —— 里面可能存有 API key,绝不入库
+# Local settings and translation cache — may hold an API key; never commit these
+settings.json
+translations.json
+.env
+.env.*
+*.key
+*.pem
+
+# Android
+node_modules/
+android/.gradle/
+android/local.properties
+*.apk
+*.aab
+
+# 由 `npx cap add android` 生成的整个原生工程 —— 是构建产物,不入库。
+#
+# 我们手写的原生代码在 android/app/src/main/ 下(仓库里有),构建时由
+# scripts/sync_android.sh 叠加到生成工程上。把生成工程也提交进来的话,
+# 等于同时维护两份 Capacitor 脚手架,两边迟早不一致。
+#
+# The whole native project produced by `npx cap add android` is build output and
+# is not committed.
+#
+# Our hand-written native code lives under android/app/src/main/ (which IS in the
+# repository) and is overlaid onto the generated project at build time by
+# scripts/sync_android.sh. Committing the generated project too would mean
+# maintaining two copies of the Capacitor scaffolding, and they would drift.
+android/android/
+android/app/build/
+android/build/
+
+# macOS
+.DS_Store

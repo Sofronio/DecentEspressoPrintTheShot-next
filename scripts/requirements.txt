@@ -1,0 +1,10 @@
+# PrintTheShot Next 运行依赖 / runtime dependencies
+#
+# 中文
+#   没有第三方依赖。绘制搬到了浏览器(canvas),服务端只剩标准库的 HTTP 服务
+#   和 CUPS 命令行调用,所以这里刻意留空 —— 安装更快、打包更小、也没有版本冲突。
+#
+# English
+#   None. Drawing moved into the browser (canvas) and the server is left with the
+#   standard library, an HTTP server and CUPS command-line calls. This file is
+#   deliberately empty: faster installs, smaller packages, no version conflicts.

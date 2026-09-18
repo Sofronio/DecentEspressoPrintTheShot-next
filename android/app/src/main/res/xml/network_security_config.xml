@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  网络安全配置 / network security configuration
+  ============================================================================
+  中文
+  ====
+  为什么需要它:
+
+  PrintTheShot 的 Web UI 要访问局域网里的服务端,地址形如
+  `http://192.168.1.100:8000` —— 明文 HTTP,没有证书。而 Android 从 API 28
+  (Android 9) 起,App 默认**禁止**明文流量,不开这个口子的话,页面里所有
+  请求都会以 `CLEARTEXT communication not permitted` 失败。
+
+  这份配置把明文允许打开,和 AndroidManifest 里的
+  `android:usesCleartextTraffic="true"` 是一致的:API 24 起以本文件为准,
+  两边都写成允许,行为才不会有分歧。
+
+  想收紧的话 / to tighten this later:
+    把 base-config 改成 cleartextTrafficPermitted="false",再加一段
+    <domain-config cleartextTrafficPermitted="true"> 只放行你的服务端地址
+    (内网域名或固定 IP)。这样除该地址外一律走 HTTPS,更安全。
+
+    Set base-config to cleartextTrafficPermitted="false" and add a
+    <domain-config cleartextTrafficPermitted="true"> listing just your server
+    host (a LAN hostname or a fixed IP). Everything else then requires HTTPS.
+
+  English
+  =======
+  The PrintTheShot web UI talks to a service on the LAN over plain HTTP, e.g.
+  `http://192.168.1.100:8000`. Since Android 9 (API 28) cleartext traffic is
+  blocked by default, and without this file every request from the page would
+  fail with `CLEARTEXT communication not permitted`.
+
+  This config opens that door, consistently with
+  `android:usesCleartextTraffic="true"` in the manifest (from API 24 this file
+  takes precedence, so both are set to allow).
+
+  Note there is deliberately no exemption for the WebView's own origin: with
+  `androidScheme: "http"` in capacitor.config.json the page itself is served
+  from http://localhost, which this base-config also covers.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

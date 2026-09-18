@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<!--
+  PrintTheShot — 出图页 / mockup renderer
+  ========================================
+  中文
+  ----
+  把一条 shot 用真实的 render.js 画两遍,把结果作为 PNG data URL 放进 DOM,
+  供 tests/make_mockup.mjs 取走存盘:
+
+    1. 图表本身(横向 1296×576)—— 界面里看到的那张
+    2. 打印位图(旋转 90°、1-bit、576 点宽)—— 实际送去打印机的那张
+
+  之所以跑真实浏览器而不是另写一段 Python 出图:这两张图的价值就在于它们和
+  线上跑的是同一份代码,另写一份就没意义了。
+
+  English
+  -------
+  Renders one shot twice through the real render.js and exposes the results as PNG
+  data URLs in the DOM for tests/make_mockup.mjs to save:
+
+    1. the chart itself (landscape 1296x576) — what the UI shows
+    2. the print bitmap (rotated 90°, 1-bit, 576 dots wide) — what the printer gets
+
+  Using a real browser rather than a separate Python renderer is the point: these
+  images are only worth anything because they come from the same code that runs in
+  production.
+
+  用法 / usage:
+    /tests/mockup.html?file=shot_x.json&lang=zh&width=576&pad=0.5
+-->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Mockup renderer</title>
+<style>
+  @font-face {
+    font-family: 'NotoSansCJKsc';
+    src: url('../web/fonts/NotoSansCJKsc-Regular.otf') format('opentype');
+    font-display: swap;
+  }
+  body { font-family: "NotoSansCJKsc", monospace; padding: 16px; background: #fff; }
+  canvas { border: 1px solid #ddd; max-width: 100%; }
+</style>
+</head>
+<body>
+<div id="status">rendering…</div>
+<canvas id="chart" width="1296" height="576"></canvas>
+<canvas id="bmp"></canvas>
+
+<script src="../web/render.js"></script>
+<script>
+(function () {
+  'use strict';
+  var R = window.PrintTheShotRender;
+  var q = new URLSearchParams(location.search);
+  var file = q.get('file') || 'prodigal_el_rafugio.json';
+  var lang = q.get('lang') || 'zh';
+  var width = parseInt(q.get('width') || '576', 10);
+  // pad 用来给打印位图加一圈留白,免得图紧贴纸边 —— 真机上热敏头边缘的
+  // 点常常打不实,留白能避免曲线被切掉。
+  // pad adds a margin around the print bitmap: dots at the very edge of a thermal
+  // head often do not fire reliably, so a margin keeps the curves from being clipped.
+  var pad = parseFloat(q.get('pad') || '0');
+
+  function report(msg) { document.getElementById('status').textContent = msg; }
+
+  function loadShot() {
+    return fetch('../shots_data/' + file)
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .catch(function () {
+        // 回退到示例数据 / fall back to the bundled sample
+        return fetch('../sample_shots/' + file).then(function (r) { return r.json(); });
+      });
+  }
+
+  function inkRatio(canvas) {
+    var d = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    var dark = 0;
+    for (var i = 0; i < d.length; i += 4) if (d[i + 3] > 200 && d[i] < 128) dark++;
+    return dark / (canvas.width * canvas.height);
+  }
+
+  R.ensureFontReady().then(loadShot).then(function (shot) {
+    // ---- 1. 图表本身 / the chart itself ----
+    var chart = document.getElementById('chart');
+    var res = R.renderShotToCanvas(shot, chart, {
+      lang: lang,
+      machineId: 'DE1-PRO',
+      scale: 1
+    });
+    if (!res.ok) { report('FAILED: ' + res.error); return; }
+
+    // ---- 2. 打印位图 / the print bitmap ----
+    var bitmap = R.canvasToBitmap(chart, { targetWidth: width, rotate: true, threshold: 200 });
+
+    var outW = bitmap.width + pad * 2;
+    var outH = bitmap.height + pad * 2;
+    var bmp = document.getElementById('bmp');
+    bmp.width = outW;
+    bmp.height = outH;
+    var ctx = bmp.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, outW, outH);
+    // 别忘了把 fillStyle 换回黑色,否则每个「黑点」都是用白色画在白色背景上,
+    // 出来是一张纯白图 —— 而且不报任何错。
+    // Remember to switch the fill back to black, or every "black dot" gets painted
+    // white on white and you get a blank image with no error to show for it.
+    ctx.fillStyle = '#000';
+    for (var y = 0; y < bitmap.height; y++) {
+      for (var x = 0; x < bitmap.width; x++) {
+        var bit = (bitmap.data[y * bitmap.bytesPerRow + (x >> 3)] >> (7 - (x & 7))) & 1;
+        if (bit) ctx.fillRect(x + pad, y + pad, 1, 1);
+      }
+    }
+
+    // 位图数据本身的置位统计 / how many bits are actually set in the payload
+    var setBits = 0;
+    for (var i = 0; i < bitmap.data.length; i++) {
+      var byteVal = bitmap.data[i];
+      while (byteVal) { setBits += byteVal & 1; byteVal >>= 1; }
+    }
+
+    // 交给外部脚本取走用的结果 / results for the driver script to pick up
+    var payload = {
+      ok: true,
+      lang: lang,
+      file: file,
+      chart: chart.toDataURL('image/png'),
+      bitmap: bmp.toDataURL('image/png'),
+      chartSize: [chart.width, chart.height],
+      bitmapSize: [bitmap.width, bitmap.height],
+      bytes: bitmap.data.length,
+      bytesPerRow: bitmap.bytesPerRow,
+      // 三个墨迹指标都报出来。只报尺寸是不够的:出图这一步曾经因为忘了把
+      // fillStyle 换回黑色而画出整张白图,尺寸数据一切正常,只有「置位比例」
+      // 能揭穿它。
+      //
+      // All three ink figures are reported. Sizes alone are not enough: the export
+      // step once produced an entirely blank sheet because the fill colour was never
+      // switched back to black, and every size reading still looked perfectly fine.
+      // Only a set-bit ratio gives that away.
+      inkChart: inkRatio(chart),
+      inkBitmapCanvas: inkRatio(bmp),
+      setBits: setBits,
+      inkBitmapData: setBits / (bitmap.width * bitmap.height),
+      escpos: (function () {
+        // 把 ESC/POS 指令头也报出来,方便人工核对
+        var header = [0x1D, 0x76, 0x30, 0x00,
+                      bitmap.bytesPerRow & 0xFF, (bitmap.bytesPerRow >> 8) & 0xFF,
+                      bitmap.height & 0xFF, (bitmap.height >> 8) & 0xFF];
+        return header.map(function (b) { return ('0' + b.toString(16)).slice(-2); }).join(' ');
+      })()
+    };
+
+    var pre = document.createElement('pre');
+    pre.id = 'MOCKUP_JSON';
+    pre.textContent = JSON.stringify(payload);
+    document.body.appendChild(pre);
+    report('done: chart ' + chart.width + '×' + chart.height +
+           ', bitmap ' + bitmap.width + '×' + bitmap.height);
+  }).catch(function (e) {
+    report('FAILED: ' + e.message);
+    var pre = document.createElement('pre');
+    pre.id = 'MOCKUP_JSON';
+    pre.textContent = JSON.stringify({ ok: false, error: String(e.message || e) });
+    document.body.appendChild(pre);
+  });
+})();
+</script>
+</body>
+</html>

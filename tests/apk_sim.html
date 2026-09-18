@@ -1,0 +1,40 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+<div id="out">running…</div>
+<script>
+window.__errs = [];
+window.addEventListener('error', function (e) { window.__errs.push(String(e.message)); });
+</script>
+<script src="/web/strings.js"></script>
+<script>
+// 模拟 APK:app.js 是原样复制的,{{LANG}} 占位符还在,且 Capacitor 存在
+window.Capacitor = { isNativePlatform: function(){ return true; }, Plugins: {} };
+</script>
+<script src="/web/printer.js"></script>
+<script src="/web/app.js"></script>
+<script>
+var results = [];
+try {
+function check(n, c, d) { results.push({name:n, ok:!!c, detail: d===undefined?'':String(d)}); }
+check('app.js 没有在第一行就挂 / app.js did not die on line 1', typeof L === 'object', typeof L);
+check('L 有内容 / L is populated', L && Object.keys(L).length > 50, L ? Object.keys(L).length + ' keys' : 'none');
+check('L.__code 推断为 zh(系统语言)/ guessed zh from the system language', L.__code === 'zh', L.__code);
+check('文案是中文而不是 key / strings are words, not keys', L.status_running && L.status_running !== 'status_running', L.status_running);
+check('platform detection works', window.PrintTheShotPrinter && window.PrintTheShotPrinter.isNative() === true);
+check('needsServerConfig() is true before configuration', PrintTheShotPrinter.needsServerConfig() === true);
+check('apiUrl falls back to the raw path when unconfigured', PrintTheShotPrinter.apiUrl('/api/status') === '/api/status');
+PrintTheShotPrinter.setServerBase('192.168.1.100:8000');
+check('setServerBase normalises to http://', PrintTheShotPrinter.getServerBase() === 'http://192.168.1.100:8000', PrintTheShotPrinter.getServerBase());
+check('apiUrl now produces an absolute URL', PrintTheShotPrinter.apiUrl('/api/status') === 'http://192.168.1.100:8000/api/status', PrintTheShotPrinter.apiUrl('/api/status'));
+PrintTheShotPrinter.setServerBase('https://coffee.example.com');
+check('https base is preserved', PrintTheShotPrinter.apiUrl('/api/status') === 'https://coffee.example.com/api/status', PrintTheShotPrinter.apiUrl('/api/status'));
+PrintTheShotPrinter.setServerBase('https://coffee.example.com/');
+check('trailing slash is trimmed', PrintTheShotPrinter.apiUrl('/api/status') === 'https://coffee.example.com/api/status');
+PrintTheShotPrinter.setServerBase('');
+check('needsServerConfig() true again after clearing', PrintTheShotPrinter.needsServerConfig() === true);
+var pre = document.createElement('pre'); pre.id='JSON';
+var failed = results.filter(function(r){return !r.ok;}).length;
+pre.textContent = JSON.stringify({passed: results.length - failed, failed: failed, results: results});
+document.body.appendChild(pre);
+document.getElementById('out').textContent = 'done';
+} catch (err) { results.push({name:'UNCAUGHT: ' + err.message, ok:false, detail: (err.stack||'').split('\n')[1]||''}); }
+</script></body></html>

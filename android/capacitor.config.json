@@ -1,0 +1,11 @@
+{
+  "appId": "com.printtheshot.app",
+  "appName": "PrintTheShotNext",
+  "webDir": "../web",
+  "server": {
+    "androidScheme": "http"
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}

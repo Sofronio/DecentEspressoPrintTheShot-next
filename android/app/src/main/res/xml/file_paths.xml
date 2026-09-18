@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider 路径 / FileProvider paths
+  ============================================================================
+  中文
+  ====
+  与 AndroidManifest 里的 FileProvider 配对使用,内容与 Capacitor 生成工程里的
+  默认文件一致。本 App 的打印链路用不到文件分享 —— 打印数据是内存里的一段
+  base64,不落盘 —— 留着它只是为了以后加分享/导出类插件时不用回头补。
+  用不到就可以连同 manifest 里的 <provider> 一起删掉。
+
+  English
+  =======
+  Pairs with the FileProvider entry in AndroidManifest.xml; identical to the
+  default file Capacitor generates. The printing path needs no file sharing
+  (the payload is an in-memory base64 string that never touches disk), so this
+  exists only so that adding a share/export plugin later does not require
+  coming back to patch it in. Remove it together with the <provider> block if
+  you do not want it.
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="my_cache_images" path="." />
+    <external-path name="my_images" path="." />
+</paths>

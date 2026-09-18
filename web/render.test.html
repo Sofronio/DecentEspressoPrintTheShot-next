@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<!--
+  PrintTheShot — Canvas 绘制独立测试页 / Standalone Canvas rendering test page
+  ===========================================================================
+  中文
+  ----
+  不依赖服务端、不依赖构建工具,直接用浏览器打开就能验证 render.js:
+    1. 加载 sample_shots/ 里的示例 JSON
+    2. 在 canvas 上绘制曲线图
+    3. 展示 canvasToBitmap() 产出的 1-bit 位图预览与统计数据
+
+  用法:
+    python3 -m http.server 8000        # 在项目根目录启动
+    浏览器打开 http://localhost:8000/web/render.test.html
+
+  English
+  -------
+  No server, no build step — open it in a browser to verify render.js:
+    1. loads the sample JSON from sample_shots/
+    2. draws the chart onto a canvas
+    3. previews the 1-bit bitmap from canvasToBitmap() plus its stats
+
+  Usage:
+    python3 -m http.server 8000        # from the project root
+    open http://localhost:8000/web/render.test.html
+-->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Render Test — PrintTheShot / 绘制测试</title>
+<style>
+  /* 自带字体:保证 Mac / Android / 桌面浏览器渲染一致
+     Bundled font: keeps macOS / Android / desktop browsers consistent */
+  @font-face {
+    font-family: 'NotoSansCJKsc';
+    src: url('fonts/NotoSansCJKsc-Regular.otf') format('opentype');
+    font-weight: normal;
+    font-display: swap;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    margin: 0; padding: 24px; background: #f5f5f5; color: #222;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 24px 0 8px; color: #444; }
+  .sub { color: #777; font-size: 13px; margin-bottom: 16px; }
+  .panel { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+  button, select, label { font-size: 13px; }
+  button { padding: 6px 14px; border: 1px solid #ccc; background: #fff; border-radius: 6px; cursor: pointer; }
+  button:hover { background: #f0f0f0; }
+  canvas { max-width: 100%; border: 1px solid #ccc; background: #fff; }
+  #chart { width: 1296px; height: 576px; }
+  #bitmapPreview { image-rendering: pixelated; }
+  pre { background: #fafafa; border: 1px solid #eee; padding: 10px; border-radius: 6px;
+        font-size: 12px; overflow: auto; max-height: 200px; }
+  .err { color: #c00; font-weight: 600; }
+  .ok { color: #080; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>Canvas 绘制测试 / Canvas Rendering Test</h1>
+<div class="sub">
+  纯前端绘制,服务端不参与渲染 — Pillow-free rendering, entirely client-side.
+</div>
+
+<div class="panel">
+  <div class="bar">
+    <button id="btnLoad">加载示例 / Load sample</button>
+    <select id="selLang">
+      <option value="zh">中文</option>
+      <option value="en">English</option>
+    </select>
+    <select id="selWidth">
+      <option value="576">80mm — 576 dots</option>
+      <option value="384">58mm — 384 dots</option>
+      <option value="512">80mm — 512 dots</option>
+    </select>
+    <label><input type="file" id="fileInput" accept=".json" style="display:none">
+      <button id="btnFile">选择 JSON 文件 / Choose JSON file</button></label>
+  </div>
+  <div id="status" class="sub">等待加载… / Waiting…</div>
+</div>
+
+<div class="panel">
+  <h2>1. 图表 Canvas / Chart canvas (1296 × 576)</h2>
+  <canvas id="chart" width="1296" height="576"></canvas>
+</div>
+
+<div class="panel">
+  <h2>2. 打印位图预览 / Print bitmap preview (1-bit, rotated 90°)</h2>
+  <div class="sub">
+    这就是 canvasToBitmap() 实际送去打印的数据,黑点 = 1,白点 = 0。
+    This is exactly what canvasToBitmap() sends to the printer: black dot = 1, white = 0.
+  </div>
+  <canvas id="bitmapPreview"></canvas>
+</div>
+
+<div class="panel">
+  <h2>3. 统计数据 / Statistics</h2>
+  <pre id="stats">—</pre>
+</div>
+
+<script src="render.js"></script>
+<script>
+(function () {
+  'use strict';
+  var R = window.PrintTheShotRender;
+  var chart = document.getElementById('chart');
+  var preview = document.getElementById('bitmapPreview');
+  var statusEl = document.getElementById('status');
+  var statsEl = document.getElementById('stats');
+  var currentJson = null;
+  var currentBitmap = null;
+
+  function setStatus(msg, cls) {
+    statusEl.className = 'sub ' + (cls || '');
+    statusEl.textContent = msg;
+  }
+
+  function draw() {
+    if (!currentJson) return;
+    var lang = document.getElementById('selLang').value;
+    var res = R.renderShotToCanvas(currentJson, chart, { lang: lang, machineId: 'DE1-TEST', scale: 1 });
+    if (!res.ok) {
+      setStatus('绘制失败 / Render failed: ' + res.error, 'err');
+      return;
+    }
+
+    // 位图转换 / bitmap conversion
+    var targetWidth = parseInt(document.getElementById('selWidth').value, 10);
+    var bmp = R.canvasToBitmap(chart, { targetWidth: targetWidth, rotate: true });
+    currentBitmap = bmp;
+
+    // 位图预览:按 1-bit 数据重新画一遍,确认打包正确
+    // Bitmap preview: repaint from the packed 1-bit data to verify the packing
+    var zoom = 1;
+    preview.width = bmp.width * zoom;
+    preview.height = bmp.height * zoom;
+    var pctx = preview.getContext('2d');
+    pctx.fillStyle = '#fff';
+    pctx.fillRect(0, 0, preview.width, preview.height);
+    var id = pctx.createImageData(bmp.width, bmp.height);
+    for (var y = 0; y < bmp.height; y++) {
+      for (var x = 0; x < bmp.width; x++) {
+        var bit = (bmp.data[y * bmp.bytesPerRow + (x >> 3)] >> (7 - (x & 7))) & 1;
+        var o = (y * bmp.width + x) * 4;
+        var v = bit ? 0 : 255;
+        id.data[o] = id.data[o + 1] = id.data[o + 2] = v;
+        id.data[o + 3] = 255;
+      }
+    }
+    pctx.putImageData(id, 0, 0);
+    // 预览缩放到可视宽度 / scale the preview to a viewable width
+    preview.style.width = bmp.width + 'px';
+    preview.style.height = 'auto';
+
+    var blackCount = 0;
+    for (var i = 0; i < bmp.data.length; i++) {
+      var b = bmp.data[i];
+      while (b) { blackCount += b & 1; b >>= 1; }
+    }
+    var total = bmp.width * bmp.height;
+
+    statsEl.textContent = [
+      '语言 / language        : ' + lang,
+      '绘制尺寸 / canvas      : ' + chart.width + ' × ' + chart.height,
+      '位图尺寸 / bitmap      : ' + bmp.width + ' × ' + bmp.height + ' dots',
+      '每行字节 / bytes/row   : ' + bmp.bytesPerRow,
+      '数据总量 / data bytes  : ' + bmp.data.length,
+      'base64 长度 / b64 len  : ' + R.bitmapToBase64(bmp).length,
+      '黑点占比 / black ratio : ' + (100 * blackCount / total).toFixed(2) + '%',
+      '点数 / dots            : ' + total
+    ].join('\n');
+
+    setStatus('渲染成功 / Rendered OK — canvas ' + res.width + '×' + res.height, 'ok');
+  }
+
+  function loadJson(obj) {
+    currentJson = obj;
+    draw();
+  }
+
+  document.getElementById('btnLoad').addEventListener('click', function () {
+    setStatus('加载中… / Loading…');
+    fetch('../sample_shots/prodigal_el_rafugio.json')
+      .then(function (r) { return r.json(); })
+      .then(loadJson)
+      .catch(function (e) { setStatus('加载失败 / Load failed: ' + e.message, 'err'); });
+  });
+
+  document.getElementById('selLang').addEventListener('change', draw);
+  document.getElementById('selWidth').addEventListener('change', draw);
+
+  document.getElementById('btnFile').addEventListener('click', function () {
+    document.getElementById('fileInput').click();
+  });
+  document.getElementById('fileInput').addEventListener('change', function (ev) {
+    var f = ev.target.files[0];
+    if (!f) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      try { loadJson(JSON.parse(reader.result)); }
+      catch (e) { setStatus('JSON 解析失败 / Parse failed: ' + e.message, 'err'); }
+    };
+    reader.readAsText(f);
+  });
+
+  // 自动加载:等待字体就绪后再画,避免首帧量到回退字体
+  // Auto-load: wait for the webfont so the first frame measures correctly
+  R.ensureFontReady().then(function () {
+    document.getElementById('btnLoad').click();
+  });
+
+  // 暴露给自动化测试 / expose for automated tests
+  window.__test = {
+    load: loadJson,
+    draw: draw,
+    getBitmap: function () { return currentBitmap; }
+  };
+})();
+</script>
+</body>
+</html>

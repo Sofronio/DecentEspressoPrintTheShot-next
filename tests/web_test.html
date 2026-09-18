@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<!--
+  PrintTheShot — 浏览器端自动化测试 / Browser-side automated test
+  =================================================================
+  中文
+  ----
+  这个页面在真实浏览器里跑,把结果写进 DOM,供无头浏览器用 --dump-dom 读取。
+  之所以用这种方式而不是看截图:断言能给出确定的通过/失败,截图只能靠眼睛。
+
+  跑法(需要服务端已经在 8780 端口跑着):
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+      --headless=new --disable-gpu --virtual-time-budget=20000 \
+      --dump-dom "http://localhost:8780/tests/web_test.html"
+
+  English
+  -------
+  Runs in a real browser and writes results into the DOM for a headless browser to
+  read back with --dump-dom. Assertions rather than screenshots, because
+  assertions give a definite pass or fail while a screenshot only gives an
+  impression.
+
+  Run (with the server already listening on port 8780):
+    ... --dump-dom "http://localhost:8780/tests/web_test.html"
+-->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Web test / 浏览器测试</title>
+<style>
+  @font-face {
+    font-family: 'NotoSansCJKsc';
+    src: url('../web/fonts/NotoSansCJKsc-Regular.otf') format('opentype');
+    font-display: swap;
+  }
+  body { font-family: "NotoSansCJKsc", monospace; padding: 16px; font-size: 13px; }
+  #results div { padding: 2px 0; }
+  .pass { color: #070; } .fail { color: #c00; font-weight: bold; }
+  canvas { border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<h1>PrintTheShot web tests</h1>
+<div id="results"></div>
+<canvas id="off" width="1296" height="576"></canvas>
+
+<script src="../web/render.js"></script>
+<script src="../web/printer.js"></script>
+<script>
+(function () {
+  'use strict';
+  var out = document.getElementById('results');
+  var results = [];
+  var passed = 0, failed = 0;
+
+  function check(name, cond, detail) {
+    var ok = !!cond;
+    if (ok) passed++; else failed++;
+    results.push({ name: name, ok: ok, detail: detail === undefined ? '' : String(detail) });
+    var d = document.createElement('div');
+    d.className = ok ? 'pass' : 'fail';
+    d.textContent = (ok ? 'PASS ' : 'FAIL ') + name + (detail !== undefined ? '  [' + detail + ']' : '');
+    out.appendChild(d);
+  }
+
+  function summary() {
+    var d = document.createElement('div');
+    d.id = 'SUMMARY';
+    d.className = failed ? 'fail' : 'pass';
+    d.textContent = 'TESTS_DONE passed=' + passed + ' failed=' + failed;
+    out.appendChild(d);
+    // 供 --dump-dom 读取的机器可读结果
+    var pre = document.createElement('pre');
+    pre.id = 'JSON';
+    pre.textContent = JSON.stringify({ passed: passed, failed: failed, results: results });
+    document.body.appendChild(pre);
+  }
+
+  var R = window.PrintTheShotRender;
+  var P = window.PrintTheShotPrinter;
+
+  check('render.js loaded', !!R);
+  check('printer.js loaded', !!P);
+
+  // 纯逻辑断言,不依赖网络 / pure-logic assertions, no network needed
+  check('niceTicks(0,100,12) gives 0..100 step 10',
+    R._niceTicks(0, 100, 12).length === 11 && R._niceTicks(0, 100, 12)[1] === 10,
+    JSON.stringify(R._niceTicks(0, 100, 12)));
+
+  var t30 = R._niceTicks(0, 30, 10);
+  check('niceTicks(0,30,10) step 5', t30[1] === 5, JSON.stringify(t30));
+
+  var t10 = R._niceTicks(0, 10, 12);
+  check('niceTicks(0,10,12) step 1', t10[1] === 1 && t10.length === 11, JSON.stringify(t10));
+
+  // 起点毛刺剔除 / start-glitch dropping
+  var glitch = R._prepareSeries({
+    elapsed: ['0', '1', '2', '3'],
+    pressure: { pressure: ['9', '0.5', '0.6', '0.7'] },   // 起点跳变 / start glitch
+    flow: { flow: ['0', '1', '2', '3'] },
+    temperature: { basket: ['93', '93', '93', '93'] }
+  });
+  check('start glitch drops the first sample',
+    glitch && glitch.pressure.length === 3 && glitch.pressure[0] === 0.5,
+    glitch ? JSON.stringify(glitch.pressure) : 'null');
+
+  // 数据过短要返回 null,不能抛异常 / too-short data returns null rather than throwing
+  var tooShort = R._prepareSeries({ elapsed: ['0'], pressure: { pressure: ['1'] }, flow: { flow: ['1'] }, temperature: { basket: ['90'] } });
+  check('too-short series returns null', tooShort === null, String(tooShort));
+
+  // 空 by_weight 不应崩(旧版就是在这里崩的)/ empty by_weight must not crash
+  var noBw = R._prepareSeries({
+    elapsed: ['0', '1', '2'],
+    pressure: { pressure: ['1', '2', '3'] },
+    flow: { flow: ['1', '2', '3'], by_weight: [] },
+    temperature: { basket: ['90', '91', '92'] }
+  });
+  check('empty by_weight falls back without crashing',
+    noBw && noBw.byWeight.length === 0, noBw ? 'byWeight=' + noBw.byWeight.length : 'null');
+
+  // ESC/POS 指令头 / ESC/POS job header
+  var fakeBitmap = { width: 16, height: 4, bytesPerRow: 2, data: new Uint8Array([0x80, 0, 0x40, 0, 0x20, 0, 0x10, 0]) };
+  var job = P.buildJob(fakeBitmap, { feedLines: 3, cut: true });
+  check('ESC/POS job starts with ESC @', job[0] === 0x1B && job[1] === 0x40, job[0] + ',' + job[1]);
+  check('ESC/POS uses GS v 0 m=0', job[2] === 0x1D && job[3] === 0x76 && job[4] === 0x30 && job[5] === 0x00,
+    Array.from(job.slice(2, 6)).join(','));
+  check('ESC/POS xL is width in BYTES (2)', job[6] === 2, job[6]);
+  check('ESC/POS yL is height in DOTS (4)', job[8] === 4, job[8]);
+  check('ESC/POS contains partial cut', Array.from(job).join(',').indexOf('29,86,66,0') >= 0);
+
+  var noCut = P.buildJob(fakeBitmap, { cut: false });
+  check('cut can be disabled', Array.from(noCut).join(',').indexOf('29,86,66,0') < 0);
+
+  check('transport is http in a plain browser', P.transport() === 'http', P.transport());
+
+  // ---------- 需要服务端的部分 / parts that need the server ----------
+  var base = location.origin;
+  var filenames = [];
+
+  (async function () {
+    try {
+      var cfg = await P.getConfig(true);
+      check('GET /api/print/config returns a platform', !!cfg.platform, cfg.platform);
+      check('print width default is 576', cfg.print_width === 576, cfg.print_width);
+    } catch (e) { check('GET /api/print/config', false, e.message); }
+
+    try {
+      var list = await P.listPrinters();
+      check('GET /api/printers returns a list', Array.isArray(list.printers), 'count=' + (list.printers || []).length);
+    } catch (e) { check('GET /api/printers', false, e.message); }
+
+    // 取一条已上传的 shot / fetch an uploaded shot
+    try {
+      var r = await fetch(base + '/api/shots');
+      var d = await r.json();
+      filenames = (d.shots || []).map(function (s) { return s.filename; });
+      check('GET /api/shots returns at least one shot', filenames.length > 0, 'count=' + filenames.length);
+    } catch (e) { check('GET /api/shots', false, e.message); }
+
+    if (!filenames.length) { summary(); return; }
+    var fn = filenames[0];
+
+    try {
+      var shot = await P.loadShot(fn, 'zh');
+      check('GET /api/shot returns shot JSON', !!shot && !!shot.elapsed, 'samples=' + ((shot && shot.elapsed && shot.elapsed.length) || 0));
+      check('shot JSON keeps the bean block', !!(shot.meta && shot.meta.bean), JSON.stringify((shot.meta || {}).bean || {}).slice(0, 50));
+    } catch (e) { check('GET /api/shot', false, e.message); }
+
+    // 真实渲染 / actually render
+    var canvas = document.getElementById('off');
+    var res = R.renderShotToCanvas(await P.loadShot(fn, 'zh'), canvas, { lang: 'zh', machineId: 'DE1-TEST', scale: 1 });
+    check('renderShotToCanvas succeeds', res.ok, res.error || 'ok');
+
+    // 画布上真的有东西:统计非白像素 / the canvas must not be blank
+    var ctx = canvas.getContext('2d');
+    var data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    var dark = 0;
+    for (var i = 0; i < data.length; i += 4) if (data[i] < 128) dark++;
+    var ratio = dark / (canvas.width * canvas.height);
+    check('canvas has ink (0.5%..40%)', ratio > 0.005 && ratio < 0.4, (ratio * 100).toFixed(2) + '%');
+
+    // 位图转换 / bitmap conversion
+    var bmp = R.canvasToBitmap(canvas, { targetWidth: 576, rotate: true, threshold: 200 });
+    check('bitmap width is 576', bmp.width === 576, bmp.width);
+    check('bitmap height is proportional (1296/576*576=1296)', Math.abs(bmp.height - 1296) <= 2, bmp.height);
+    check('bytesPerRow = ceil(576/8) = 72', bmp.bytesPerRow === 72, bmp.bytesPerRow);
+    check('data length = bytesPerRow * height', bmp.data.length === bmp.bytesPerRow * bmp.height, bmp.data.length);
+
+    var bits = 0;
+    for (var j = 0; j < bmp.data.length; j++) {
+      var b = bmp.data[j];
+      while (b) { bits += b & 1; b >>= 1; }
+    }
+    var bmpRatio = bits / (bmp.width * bmp.height);
+    check('bitmap ink ratio matches canvas (within 1.5x)',
+      bmpRatio > ratio * 0.5 && bmpRatio < ratio * 1.7,
+      (bmpRatio * 100).toFixed(2) + '% vs ' + (ratio * 100).toFixed(2) + '%');
+
+    // 位图尺寸自洽:服务端会做同样的校验 / the server runs the same check
+    check('bitmap length matches server expectation',
+      bmp.data.length === Math.ceil(bmp.width / 8) * bmp.height, bmp.data.length);
+
+    // 真的发一次 /api/print。没有打印机没关系 —— 这里验的是接口形状:
+    // 请求被接受、位图通过校验、适配器被调用,失败原因要说得清楚。
+    //
+    // Actually POST /api/print. No printer is attached, and that is fine: what is
+    // under test is the interface shape — the request is accepted, the bitmap
+    // passes validation, the adapter is invoked, and any failure is explained.
+    try {
+      var pr = await fetch(base + '/api/print', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bitmap: R.bitmapToBase64(bmp),
+          width: bmp.width, height: bmp.height,
+          printer: 'default', label: fn
+        })
+      });
+      var pj = await pr.json();
+      check('POST /api/print returns success:true', pj.success === true, JSON.stringify(pj).slice(0, 120));
+      check('POST /api/print echoes the platform', !!pj.platform, pj.platform);
+      check('POST /api/print echoes the bitmap size',
+        pj.width === bmp.width && pj.height === bmp.height, pj.width + 'x' + pj.height);
+    } catch (e) { check('POST /api/print', false, e.message); }
+
+    // 长度不符必须被拒 / a length mismatch must be rejected
+    try {
+      var br = await fetch(base + '/api/print', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bitmap: R.bitmapToBase64(bmp), width: 999, height: bmp.height })
+      });
+      var bj = await br.json();
+      check('POST /api/print rejects a size mismatch', bj.success === false, JSON.stringify(bj).slice(0, 100));
+    } catch (e) { check('POST /api/print rejects mismatch', false, e.message); }
+
+    // 垃圾 base64 必须被拒 / garbage base64 must be rejected
+    try {
+      var gr = await fetch(base + '/api/print', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bitmap: '!!!not-base64!!!', width: 8, height: 1 })
+      });
+      var gj = await gr.json();
+      check('POST /api/print rejects bad base64', gj.success === false, JSON.stringify(gj).slice(0, 100));
+    } catch (e) { check('POST /api/print rejects bad base64', false, e.message); }
+
+    // 待打印队列:上传时入队,ack 后出队 / the pending queue: enqueued on upload, cleared by ack
+    try {
+      var qr = await fetch(base + '/api/print-queue');
+      var qj = await qr.json();
+      check('GET /api/print-queue returns jobs', Array.isArray(qj.jobs), 'count=' + (qj.jobs || []).length);
+      if (qj.jobs && qj.jobs.length) {
+        var target = qj.jobs[0].filename;
+        var ar = await fetch(base + '/api/print-queue/ack', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: target, ok: true })
+        });
+        var aj = await ar.json();
+        check('POST /api/print-queue/ack removes the job',
+          !aj.jobs.some(function (j) { return j.filename === target; }),
+          'remaining=' + aj.jobs.length);
+      }
+    } catch (e) { check('print queue round-trip', false, e.message); }
+
+    summary();
+  })();
+})();
+</script>
+</body>
+</html>
