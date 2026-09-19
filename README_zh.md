@@ -2,7 +2,7 @@
 
 中文 | [English](README.md)
 
-> ⚠️ **测试状态**:软件层面已验证 —— 打印层、HTTP 服务端、Canvas 绘制、Web 界面共 **94 项自动化测试全部通过**。但 **尚未与真实热敏打印机或真实 DE1 联调**,因为手边暂时没有打印机。ESC/POS 字节布局、PBM/BMP 输出、CUPS/蓝牙调用路径都有测试覆盖 —— 不过覆盖的是「字节对不对」,不是「纸上印出来对不对」。
+> ⚠️ **测试状态**:软件层面已验证 —— 打印层、HTTP 服务端、Canvas 绘制、Web 界面共 **133 项自动化测试全部通过**。但 **尚未与真实热敏打印机或真实 DE1 联调**,因为手边暂时没有打印机。ESC/POS 字节布局、PBM/BMP 输出、CUPS/蓝牙调用路径都有测试覆盖 —— 不过覆盖的是「字节对不对」,不是「纸上印出来对不对」。
 
 ## 相比 Beta 改了什么
 
@@ -31,6 +31,18 @@ python3 print_the_shot_server.py          # 默认 8000 端口
 浏览器打开 `http://localhost:8000` 就是管理界面。
 
 没有 `pip install` 这一步:绘制在浏览器里做,打印层调用的是系统本来就有的工具(macOS/Linux 的 CUPS、Windows 的打印后台)。
+
+> **macOS 打包版。** 应用未做公证(需要付费的 Apple 开发者账号),所以 macOS 会
+> 拒绝首次启动,提示*「无法打开,因为无法验证开发者」*。放行一次即可:
+>
+> ```bash
+> xattr -dr com.apple.quarantine /Applications/PrintTheShot.app
+> ```
+>
+> 或者到 **系统设置 → 隐私与安全性**,点**「仍要打开」**。
+>
+> 注意这和*「已损坏,无法打开」*不是一回事 —— 后者是签名本身校验失败,**右键打开
+> 也救不了**。看到「已损坏」说明拿到的是旧版本,重新下载。
 
 ## 架构
 
@@ -70,6 +82,23 @@ canvasToBitmap(canvas)  →  { width, height, bytesPerRow, data }
 
 Android 原生插件当然可以自己拼 `GS v 0` 指令。它刻意不那么做。如果协议实现两份 —— 桌面打印一份 JS、蓝牙一份 Java —— 两份迟早会走偏,而症状是「只有 Android 打出来是乱的」,在桌面上根本看不见。只留一份实现,这类 bug 就不可能发生;代价是原生层退化成一个纯粹的字节管道。这个交换是划算的。
 
+### 作为打包应用运行
+
+打包版和源码运行有几点不同,值得知道:
+
+- **启动时会自动打开管理界面。** 它是后台服务,没有窗口也没有 Dock 图标,否则
+  用户无从判断它到底起来没有。
+- **状态卡片里会出现一个红色的「停止服务」按钮** —— 但只在 **macOS** 版出现。
+  它是唯一一种没有别的停止方式的形态:没 Dock 图标、没窗口、没终端。Windows 有
+  控制台窗口可以关掉,Linux 通常就是在终端里跑的。在终端里停止用
+  `pkill -f PrintTheShot.app`。
+- **会写一份日志**到 `~/Library/Application Support/PrintTheShot/server.log`
+  (Windows / Linux 是对应路径)。打包版没有终端,启动失败时这是唯一能看到原因
+  的地方。
+
+> 停止端点**不限来源 IP**,同一网络里任何设备都能调用。自家局域网没问题;共享
+> 网络请收紧 `_allow_shutdown()`。
+
 ## Web 界面说明
 
 - **状态卡片**:运行状态、收到的 shot 数、打印开关、豆子信息开关
@@ -106,10 +135,14 @@ python3 print_the_shot_server.py --print-mode raw   # 覆盖打印模式
 
 | 测试 | 项数 | 需要什么 |
 |---|---|---|
+| 前端 JS 语法 | 5 个文件 | `node` —— 一个括号写错就是白屏 |
 | `tests/test_printers.py` | 18 | 无 —— 纯字节布局逻辑 |
-| `tests/test_server.py` | 18 | 无 —— 自己起一个真服务端进程 |
+| `tests/test_platform_dispatch.py` | 20 | 无 |
+| `tests/test_server.py` | 22 | 无 —— 自己起一个真服务端进程 |
+| `tests/test_cups_e2e.py` | 3 | `lpadmin` 权限 —— 真实 CUPS 往返 |
 | `tests/web_test.html` | 36 | Chrome + 一个跑着的服务端 |
 | `tests/ui_test.html` | 22 | Chrome + 一个跑着的服务端 |
+| `tests/apk_sim.html` | 12 | Chrome + 一个跑着的服务端 |
 
 打印层与服务端两组在任何机器上都能跑。浏览器两组用真实无头 Chrome 走 DevTools 协议驱动(`tests/run_web_tests.mjs`);机器上没有 Chrome 时会**明确提示跳过,而不是默默算通过**。
 
@@ -134,7 +167,7 @@ web/
   render.test.html          # 独立的绘制测试页
 android/                    # Capacitor 工程 + 原生蓝牙插件
 tests/                      # 四组测试
-fonts/                      # 内置 Noto Sans CJK SC(SIL OFL)
+web/fonts/                  # 内置 Noto Sans CJK SC(SIL OFL,随 web 打包进 APK)
 plugin/plugin.tcl           # DE1 插件(未改动,仍兼容 v1.6)
 scripts/                    # 构建脚本 + PyInstaller spec
 sample_shots/               # 示例数据
@@ -162,6 +195,7 @@ shots_data/                 # 运行时:上传的 JSON + index.json
 | POST | `/api/translate/shot` | 翻译一条 shot 的文案(写回数据文件) |
 | GET | `/download/json/*` | JSON 下载 |
 | GET | `/plugin/plugin.tcl` `.txt` | 插件下载 |
+| POST | `/api/shutdown` | **停止服务**(不限来源 IP,见上文) |
 | GET · POST | `/api/update/check` `/api/update` | 服务更新 |
 
 已移除:`GET /images/*.png`(不再有图片)和 `python print_the_shot_server.py --render`(服务端已经没有可渲染的东西了)。

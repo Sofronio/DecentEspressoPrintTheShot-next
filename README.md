@@ -2,7 +2,7 @@
 
 [中文文档](README_zh.md) | English
 
-> ⚠️ **Test status**: verified at the software level — 94 automated tests pass across the printing layer, the HTTP server, the Canvas renderer and the web UI. **Nothing has been verified against a real thermal printer or a real DE1**, because no printer is currently on hand. The ESC/POS byte layout, the PBM/BMP output and the CUPS/Bluetooth call paths are all covered by tests that check the bytes, not the paper.
+> ⚠️ **Test status**: verified at the software level — 133 automated tests pass across the printing layer, the HTTP server, the Canvas renderer and the web UI. **Nothing has been verified against a real thermal printer or a real DE1**, because no printer is currently on hand. The ESC/POS byte layout, the PBM/BMP output and the CUPS/Bluetooth call paths are all covered by tests that check the bytes, not the paper.
 
 ## What changed from Beta
 
@@ -31,6 +31,19 @@ python3 print_the_shot_server.py          # default port 8000
 Open `http://localhost:8000` for the management UI.
 
 There is no `pip install` step: rendering happens in the browser and the printing layer shells out to tools your OS already ships (CUPS on macOS/Linux, the print spooler on Windows).
+
+> **Packaged macOS builds.** The app is not notarized (that needs a paid Apple
+> Developer account), so macOS refuses the first launch with *"cannot be opened
+> because the developer cannot be verified"*. Allow it once:
+>
+> ```bash
+> xattr -dr com.apple.quarantine /Applications/PrintTheShot.app
+> ```
+>
+> or **System Settings → Privacy & Security → Open Anyway**.
+>
+> This is *not* the same as *"the app is damaged"* — that means the code signature
+> itself failed and cannot be bypassed. If you see that, re-download.
 
 ## Architecture
 
@@ -70,6 +83,25 @@ That is exactly what ESC/POS `GS v 0` wants, which is why nothing has to be re-e
 
 A native Android plugin could assemble the `GS v 0` command itself. It deliberately does not. If the protocol were implemented twice — once in JS for desktop printing and once in Java for Bluetooth — the two would drift, and the symptom would be an Android-only garbled print that is invisible from the desktop. Keeping one implementation makes that class of bug impossible, at the cost of the native layer being a dumb byte pipe. That is the right trade.
 
+### Running it as a packaged app
+
+A packaged build behaves differently from a source run, in three ways worth knowing:
+
+- **The web UI opens by itself on start.** The app is a background service with no
+  window and no Dock icon, so there is otherwise nothing to indicate it came up.
+- **A red "Stop service" button** appears in the status card — but only in the
+  **macOS** build. It is the one configuration with no other way to stop it: no Dock
+  icon, no window, no terminal. Windows has a console window to close, and Linux is
+  normally run from a terminal. Stop it from a terminal with
+  `pkill -f PrintTheShot.app`.
+- **A log is written** to `~/Library/Application Support/PrintTheShot/server.log`
+  (the equivalent path on Windows and Linux). A packaged app has no terminal, so
+  this file is the only place a startup failure will be visible.
+
+> The shutdown endpoint is **not restricted by source IP**, so anything on the same
+> network can reach it. Fine on a home LAN; on a shared network, tighten
+> `_allow_shutdown()`.
+
 ## Web UI Guide
 
 - **Status card**: running state, shots received, print toggle, bean-info toggle
@@ -106,10 +138,14 @@ python3 print_the_shot_server.py --print-mode raw   # override the mode
 
 | Suite | Count | Needs |
 |---|---|---|
+| front-end JS syntax | 5 files | `node` — one bad paren is a blank UI |
 | `tests/test_printers.py` | 18 | nothing — pure byte-layout logic |
-| `tests/test_server.py` | 18 | nothing — spawns a real server |
+| `tests/test_platform_dispatch.py` | 20 | nothing |
+| `tests/test_server.py` | 22 | nothing — spawns a real server |
+| `tests/test_cups_e2e.py` | 3 | `lpadmin` rights — a real CUPS round trip |
 | `tests/web_test.html` | 36 | Chrome + a running server |
 | `tests/ui_test.html` | 22 | Chrome + a running server |
+| `tests/apk_sim.html` | 12 | Chrome + a running server |
 
 The printing and server suites run anywhere. The browser suites use real headless Chrome over the DevTools Protocol (`tests/run_web_tests.mjs`) and are skipped with an explicit warning — not a silent pass — when Chrome is absent.
 
@@ -134,7 +170,7 @@ web/
   render.test.html          # standalone renderer test page
 android/                    # Capacitor project + native Bluetooth plugin
 tests/                      # all four suites
-fonts/                      # bundled Noto Sans CJK SC (SIL OFL)
+web/fonts/                  # bundled Noto Sans CJK SC (SIL OFL; ships inside the APK)
 plugin/plugin.tcl           # DE1 plugin (unchanged, still v1.6-compatible)
 scripts/                    # build scripts + PyInstaller spec
 sample_shots/               # sample data
@@ -162,6 +198,7 @@ shots_data/                 # runtime: uploaded JSON + index.json
 | POST | `/api/translate/shot` | translate a shot's text (writes back to the data file) |
 | GET | `/download/json/*` | JSON download |
 | GET | `/plugin/plugin.tcl` `.txt` | plugin download |
+| POST | `/api/shutdown` | **stop the service** (not IP-restricted, see above) |
 | GET · POST | `/api/update/check` `/api/update` | service update |
 
 Removed: `GET /images/*.png` (there are no images any more) and `python print_the_shot_server.py --render` (there is nothing to render server-side).

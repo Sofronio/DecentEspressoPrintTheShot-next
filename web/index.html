@@ -33,6 +33,18 @@
       <button class="btn green" id="btn-print" onclick="togglePrint()"></button>
       <button class="btn" id="btn-bean" onclick="toggleBean()"></button>
       <button class="btn gray" onclick="refreshAll()" id="btn-refresh"></button>
+      <!-- 停止服务。默认隐藏(display:none),由 loadStatus() 按服务端返回的
+           show_stop_button 决定是否显示 —— 只有 macOS 打包版需要它,因为只有那种
+           情况下用户没有别的停止方式(没 Dock 图标、没窗口、没终端)。
+           默认隐藏而不是默认显示,是为了避免在不需要它的平台上闪一下。
+
+           红色 + 放最右边,是因为它是唯一一个会让界面本身失效的操作。
+
+           Stop service. Hidden by default and revealed by loadStatus() according to
+           the server's show_stop_button — only a packaged macOS build needs it.
+           Red and rightmost because it is the only action that takes the page itself
+           down; it should not look like "Refresh". -->
+      <button class="btn red" onclick="stopService()" id="btn-shutdown" style="float:right;display:none"></button>
     </div>
   </div>
 

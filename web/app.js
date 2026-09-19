@@ -328,6 +328,9 @@ async function loadStatus() {
   const grid = document.getElementById('status-grid');
   grid.innerHTML = items.map(([label, value, cls]) =>
     `<div class="stat"><div class="label">${label}</div><div class="value ${cls}">${value}</div></div>`).join('');
+  // 只有 macOS 打包版才需要这个按钮(见服务端 show_stop_button 的说明)
+  // Only a packaged macOS build needs this button; see show_stop_button
+  document.getElementById('btn-shutdown').style.display = s.show_stop_button ? '' : 'none';
   document.getElementById('btn-print').textContent = s.print_enabled ? T('disable_print') : T('enable_print');
   document.getElementById('btn-print').classList.toggle('green', !s.print_enabled);
   document.getElementById('btn-bean').textContent = s.bean_info_enabled ? T('disable_bean_info') : T('enable_bean_info');
@@ -641,6 +644,59 @@ async function printLightbox() {
 
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
 
+/**
+ * 停止服务。
+ *
+ * 两件事要说清楚:
+ *
+ *   1. **二次确认不能省。** 这是唯一一个会让当前页面立刻失效的操作,误点一次
+ *      就得去重新启动应用。
+ *   2. **服务停掉之后这个页面就"死"了** —— 后续所有轮询都会失败,页面上会冒出
+ *      一堆错误提示。所以停之前先把定时刷新关掉,再把界面切到一个明确的"已停止"
+ *      状态,而不是让用户对着一堆报错猜发生了什么。
+ *
+ * 服务端是先回响应再真正停止的,所以这里能正常收到 200。
+ *
+ * Stopping the service.
+ *
+ * Two things worth being explicit about:
+ *
+ *   1. **The confirmation is not optional.** It is the only action that immediately
+ *      invalidates the page you are looking at.
+ *   2. **Once stopped, this page is dead** — every subsequent poll fails and the UI
+ *      fills with error messages. So the refresh timer is cleared first and the page
+ *      is switched to an explicit "stopped" state, rather than leaving the user to
+ *      guess what happened from a wall of red.
+ *
+ * The server answers before it stops, which is why a 200 arrives here.
+ */
+async function stopService() {
+  if (!confirm(T('shutdown_confirm'))) return;
+  const btn = document.getElementById('btn-shutdown');
+  btn.disabled = true;
+  btn.textContent = '⏳ ' + T('btn_shutdown');
+  try {
+    const r = await api('/api/shutdown', { method: 'POST' });
+    if (!r.success) {
+      alert('❌ ' + (r.message || T('shutdown_failed')));
+      btn.disabled = false;
+      btn.textContent = '⏻ ' + T('btn_shutdown');
+      return;
+    }
+  } catch (e) {
+    // 服务可能已经停了、连接被拒 —— 那其实说明操作成功了
+    // The service may already be down and the connection refused — which means it
+    // actually worked
+  }
+  clearInterval(window.__refreshTimer);
+  document.querySelector('main').innerHTML =
+    '<div class="card" style="text-align:center;padding:48px 24px">'
+    + '<div style="font-size:40px">⏻</div>'
+    + '<h2 style="justify-content:center;margin-top:12px">' + T('shutdown_ok') + '</h2>'
+    + '<p class="note" style="margin-top:8px">' + T('shutdown_sent') + '</p>'
+    + '</div>';
+}
+
 async function togglePrint() {
   const s = await api('/api/status');
   await api('/api/settings/print', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({enabled: !s.print_enabled}) });
@@ -722,6 +778,7 @@ function initText() {
   document.getElementById('h-plugin').textContent = '📥 ' + T('plugin_download');
   document.getElementById('btn-clear').textContent = T('clear_queue');
   document.getElementById('btn-refresh').textContent = '↻ ' + T('refresh');
+  document.getElementById('btn-shutdown').textContent = '⏻ ' + T('btn_shutdown');
   document.getElementById('btn-plugin').textContent = T('plugin_local');
   document.getElementById('btn-plugin-github').textContent = T('plugin_github');
   document.getElementById('btn-plugin-txt').textContent = T('plugin_txt');
@@ -750,7 +807,7 @@ initLangSwitcher();
 initLangPresets();
 loadAiSettings();
 refreshAll();
-setInterval(refreshAll, 8000);
+window.__refreshTimer = setInterval(refreshAll, 8000);
 
 // ---------- 打印初始化 / Printing bootstrap ----------
 // 上传到达的 shot 由前端这边渲染并打印(服务端手里没有图),所以这里要起一个
