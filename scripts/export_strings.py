@@ -42,6 +42,7 @@ up as raw keys leaking into the UI.
 
 import json
 import os
+import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -125,6 +126,16 @@ def load_languages():
     return ns["LANGUAGES"]
 
 
+def read_version():
+    """从服务端源码里取 VERSION / read VERSION out of the server source."""
+    with open(SERVER, encoding="utf-8") as f:
+        for line in f:
+            m = re.match(r'VERSION\s*=\s*"([^"]+)"', line.strip())
+            if m:
+                return m.group(1)
+    raise SystemExit("❌ 找不到 VERSION / could not find VERSION")
+
+
 def main():
     languages = load_languages()
     # 只导出真正的文案,__code / __languages 这些是运行时附加的
@@ -136,8 +147,18 @@ def main():
         raise SystemExit("❌ 缺少语言 / missing languages: %s" % ", ".join(missing))
 
     payload = {"en": clean(languages["en"]), "zh": clean(languages["zh"])}
+    version = read_version()
     with open(OUT, "w", encoding="utf-8") as f:
         f.write(HEADER)
+        # 版本号也要一起导出。index.html 里写的是 <title>...v{{VERSION}}</title>,
+        # 由服务端替换 —— 而打包进 APK 时没人替换,标题里就会留着字面的
+        # "{{VERSION}}"。带上版本号,前端就能自己把它补上。
+        #
+        # The version goes out too. index.html has <title>...v{{VERSION}}</title> and
+        # the server substitutes it — but nothing does when the files are bundled into
+        # the APK, leaving a literal "{{VERSION}}" in the title. Shipping the version
+        # lets the front end fill it in itself.
+        f.write("window.PTS_VERSION = %s;\n\n" % json.dumps(version, ensure_ascii=False))
         f.write("window.PTS_STRINGS = ")
         json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
         f.write(";\n")

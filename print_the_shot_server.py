@@ -1779,7 +1779,21 @@ class PrintTheShotHandler(http.server.SimpleHTTPRequestHandler):
 
         name = os.path.basename(full)
 
-        if name.endswith((".js", ".html", ".css")):
+        # 模板替换只对 web/ 下的文件做。
+        #
+        # 原来对任何 .html/.js/.css 都做,于是 /tests/ 下的测试页也被替换 ——
+        # 包括测试页里**作为断言内容**出现的字面量。结果是断言在发送途中被悄悄
+        # 改写,测出来的东西和写的不是一回事。这种"测试被服务端改坏"的问题极难
+        # 排查,因为文件本身看起来完全正常。
+        #
+        # Substitution happens for files under web/ only.
+        #
+        # It used to run for any .html/.js/.css, which included the test pages under
+        # /tests/ — and their placeholder literals are assertion *content*. The
+        # assertions were silently rewritten in flight, so they no longer tested what
+        # they said. That kind of corruption is very hard to trace, because the file
+        # on disk looks perfectly correct.
+        if subdir == "web" and name.endswith((".js", ".html", ".css")):
             try:
                 with open(full, "r", encoding="utf-8") as f:
                     text = f.read()

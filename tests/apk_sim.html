@@ -1,4 +1,14 @@
-<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<!-- 标题里故意留着 {{VERSION}} 占位符,模拟打包进 APK 的 index.html ——
+     那里的文件是原样复制的,没有任何服务端参与替换。
+     The title deliberately keeps a {{VERSION}} placeholder to imitate the
+     index.html bundled into the APK, where files are copied verbatim and
+     nothing substitutes anything. -->
+<title>APK sim v</title></head><body>
+<script>
+// 把占位符塞进标题,模拟打包进 APK 的 index.html(那里没人替换)
+document.title = "APK sim v" + '{' + '{VERSION}}';
+</script>
 <div id="out">running…</div>
 <script>
 window.__errs = [];
@@ -31,6 +41,17 @@ PrintTheShotPrinter.setServerBase('https://coffee.example.com/');
 check('trailing slash is trimmed', PrintTheShotPrinter.apiUrl('/api/status') === 'https://coffee.example.com/api/status');
 PrintTheShotPrinter.setServerBase('');
 check('needsServerConfig() true again after clearing', PrintTheShotPrinter.needsServerConfig() === true);
+// app.js 必须把标题里的 {{VERSION}} 补上 —— APK 里没人替换它
+// app.js must fill in {{VERSION}} in the title; nothing does inside the APK
+// 占位符在运行时拼出来,不写成字面量 —— 服务端会替换掉页面里的 {{VERSION}},
+// 把它写死在断言里的话,断言会在发送途中被改写成别的东西。
+// Build the placeholder at run time rather than as a literal: the server substitutes
+// {{VERSION}} anywhere in the page, so a literal here would be rewritten in flight.
+var _ph = '{' + '{VERSION}}';
+var _t = document.title;
+check('标题占位符被替换 / title placeholder filled in',
+  _t.indexOf(_ph) === -1 && /v\d+\.\d+/.test(_t), _t);
+
 var pre = document.createElement('pre'); pre.id='JSON';
 var failed = results.filter(function(r){return !r.ok;}).length;
 pre.textContent = JSON.stringify({passed: results.length - failed, failed: failed, results: results});

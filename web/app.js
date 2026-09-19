@@ -57,6 +57,29 @@ function resolveStrings() {
 const L = resolveStrings();
 let currentLang = L.__code || 'en';
 
+/**
+ * 补上标题里的版本号 / fill in the version in the page title.
+ *
+ * index.html 写的是 `<title>PrintTheShot Next v{{VERSION}}</title>`,服务端发页面
+ * 时会替换它。但打包进 APK 时文件是原样复制的,没人替换,标题里就留着字面的
+ * "{{VERSION}}" —— 和 {{LANG}} 是同一类问题,只是后果轻得多(Android 的 WebView
+ * 不显示页面标题,基本看不到)。
+ *
+ * strings.js 里带了版本号,这里补上。
+ *
+ * index.html reads <title>PrintTheShot Next v{{VERSION}}</title> and the server
+ * substitutes it. Files bundled into the APK are copied verbatim, so nothing does —
+ * the literal "{{VERSION}}" stays in the title. Same class as {{LANG}}, far less
+ * serious (an Android WebView does not display the page title). strings.js carries
+ * the version, so fill it in here.
+ */
+(function fixTitleVersion() {
+  const placeholder = '{{' + 'VERSION}}';
+  if (document.title.indexOf(placeholder) === -1) return;
+  document.title = document.title.split(placeholder)
+    .join(window.PTS_VERSION || '');
+})();
+
 // 动态语言切换器(内置 + 自定义) / dynamic language switcher (built-in + custom)
 function initLangSwitcher() {
   const langs = L.__languages || [{code: 'en', name: 'English'}, {code: 'zh', name: '中文'}];
