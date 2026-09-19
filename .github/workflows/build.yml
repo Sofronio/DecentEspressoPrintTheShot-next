@@ -1,4 +1,4 @@
-name: Build PrintTheShot Beta
+name: Build PrintTheShot Next
 
 on:
   push:
@@ -13,14 +13,34 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # 只列 include:macOS 要出两个架构,不能再用 os 简写列表 —— 那样两个
+        # macOS 条目会互相覆盖,只剩一个。
+        #
+        # include only: macOS needs two architectures, and the short `os:` list form
+        # cannot express that — the two macOS entries would collapse into one.
         include:
           - os: ubuntu-latest
             artifact: PrintTheShot-linux-x64
             script: scripts/build_linux.sh
+
+          # Apple Silicon。GitHub 的 macos-latest / macos-14 / macos-15 都是 arm64。
+          # Apple Silicon. macos-latest, macos-14 and macos-15 are all arm64 on
+          # GitHub-hosted runners.
           - os: macos-latest
-            artifact: PrintTheShot-macos
+            artifact: PrintTheShot-macos-arm64
+            macos_arch: arm64
             script: scripts/build_macos.sh
+
+          # Intel。必须显式点名 -intel 后缀的 runner,否则拿到的还是 arm64 机器,
+          # 打出来的包在 Intel Mac 上根本跑不起来。
+          #
+          # Intel. The -intel suffix has to be explicit; otherwise you get an arm64
+          # machine again and the result cannot run on an Intel Mac at all.
+          - os: macos-15-intel
+            artifact: PrintTheShot-macos-intel
+            macos_arch: intel
+            script: scripts/build_macos.sh
+
           - os: windows-latest
             artifact: PrintTheShot-windows-x64.exe
             script: scripts/build_windows.bat
@@ -40,6 +60,33 @@ jobs:
           else
             bash -lc "cd \$GITHUB_WORKSPACE && chmod +x ${{ matrix.script }} && ./${{ matrix.script }}"
           fi
+
+      - name: Verify the macOS build is signed and the right architecture
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -e
+          APP=dist/PrintTheShot.app
+          [ -d "$APP" ] || { echo "::error::dist/PrintTheShot.app 不存在"; exit 1; }
+
+          # 架构必须和这个 runner 对上。跑错 runner 的话产物架构就错了,而那种
+          # 错误在 Release 页面上下载的人才会遇到 —— 在这里挡住。
+          # The architecture must match this runner. A wrong runner produces a wrong
+          # architecture, and that mistake only surfaces for whoever downloads it from
+          # the Releases page — so block it here.
+          echo "期望架构 / expected: ${{ matrix.macos_arch }}"
+          ACTUAL=$(lipo -archs "$APP/Contents/MacOS/PrintTheShot")
+          echo "实际架构 / actual  : $ACTUAL"
+          case "${{ matrix.macos_arch }}" in
+            arm64) [ "$ACTUAL" = "arm64" ] || { echo "::error::期望 arm64,实际 $ACTUAL"; exit 1; } ;;
+            intel) [ "$ACTUAL" = "x86_64" ] || { echo "::error::期望 x86_64,实际 $ACTUAL"; exit 1; } ;;
+          esac
+
+          # 签名必须是有效的 —— 这条挡住的是「下载者看到已损坏」那个历史问题。
+          # The signature must be valid: this is the check that stops the historical
+          # "downloaders see it as damaged" failure from coming back.
+          codesign --verify --verbose=2 "$APP"
+          echo "✅ 架构与签名都正确 / architecture and signature both good"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -63,12 +110,29 @@ jobs:
 
       - name: Prepare release files
         run: |
+          set -e
           mkdir -p release
           cp artifacts/PrintTheShot-linux-x64/PrintTheShot release/PrintTheShot-linux
-          cp artifacts/PrintTheShot-macos/PrintTheShot-macos.zip release/PrintTheShot-macos.zip
           cp artifacts/PrintTheShot-windows-x64.exe/PrintTheShot.exe release/PrintTheShot-windows-x64.exe
+
+          # 两个 macOS 包必须改成不同的名字。中间那个 zip 在两个 artifact 里同名
+          # (都叫 dist/PrintTheShot-macos.zip),直接 cp 会让后一个覆盖前一个,
+          # 结果就是 Release 上只剩一个架构,而且没人会发现。
+          #
+          # The two macOS builds must be renamed. The inner zip has the same name in
+          # both artifacts (dist/PrintTheShot-macos.zip), so a plain cp would let the
+          # second overwrite the first — leaving one architecture on the release, with
+          # nothing to indicate it.
+          cp artifacts/PrintTheShot-macos-arm64/PrintTheShot-macos.zip release/PrintTheShot-macos-arm64.zip
+          cp artifacts/PrintTheShot-macos-intel/PrintTheShot-macos.zip release/PrintTheShot-macos-intel.zip
+
+          echo "--- 待发布文件 / files to release ---"
           ls -la release/
 
       - uses: softprops/action-gh-release@v2
         with:
+          # 测试版,标成 pre-release —— 正式版不该被测试版的更新提示盖过
+          # Beta: mark it pre-release so it does not eclipse a stable release in
+          # update checks
+          prerelease: true
           files: release/*
