@@ -50,7 +50,6 @@ from io import BytesIO
 
 VERSION = "2.1-next.1"
 
-
 def runtime_data_dir():
     """
     可写的数据目录 / the writable data directory.
@@ -79,7 +78,6 @@ def runtime_data_dir():
     if os.name == "nt":
         return os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "PrintTheShot")
     return os.path.join(os.path.expanduser("~"), ".local", "share", "PrintTheShot")
-
 
 DATA_DIR = os.path.join(runtime_data_dir(), "shots_data")
 # 注意:不再有 shots_images 目录 —— 服务端不生成图片了
@@ -116,11 +114,31 @@ def resource_path(rel):
         base = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, rel)
 
+# 自更新与插件分发的地址 —— 必须指向**本项目自己的仓库**。
+#
+# 原来这三个都指向 Sofronio/DecentEspressoPrintTheShot(原项目),而那个仓库里
+# 是 v1.6。后果不是「偶尔拉错版本」,而是自更新彻底失效:「检查更新」读到的远端
+# 版本恒为 1.6,永远判定为「已是最新」,用户永远收不到更新。
+#
+# 之所以没造成破坏,只是因为 1.6 比当前版本号小,更新按钮保持禁用 —— 万一哪天
+# 原仓库的版本号被改大,那就成了「把用户降级到 v1.6」。
+#
+# These three URLs must point at **this project's own repository**.
+#
+# They used to point at Sofronio/DecentEspressoPrintTheShot, which holds v1.6. The
+# consequence was not "occasionally the wrong version" but a self-update that never
+# worked at all: the remote version read as 1.6 forever, so the check always said
+# "already up to date" and no update was ever offered.
+#
+# It caused no damage only because 1.6 sorts below the current version, leaving the
+# update button disabled — had that repository's version ever been bumped, this
+# would have downgraded users to v1.6.
+_REPO = "Sofronio/DecentEspressoPrintTheShot-next"
+PLUGIN_GITHUB_URL = f"https://raw.githubusercontent.com/{_REPO}/main/plugin/plugin.tcl"
+RAW_SERVER_URL = f"https://raw.githubusercontent.com/{_REPO}/main/print_the_shot_server.py"
+GITHUB_ZIP_URL = f"https://codeload.github.com/{_REPO}/zip/refs/heads/main"
 WEB_INDEX = resource_path(os.path.join("web", "index.html"))
 PLUGIN_TCL = resource_path(os.path.join("plugin", "plugin.tcl"))  # bundle内(只读)
-PLUGIN_GITHUB_URL = "https://raw.githubusercontent.com/Sofronio/DecentEspressoPrintTheShot/main/plugin/plugin.tcl"
-RAW_SERVER_URL = "https://raw.githubusercontent.com/Sofronio/DecentEspressoPrintTheShot/main/print_the_shot_server.py"
-GITHUB_ZIP_URL = "https://codeload.github.com/Sofronio/DecentEspressoPrintTheShot/zip/refs/heads/main"
 
 
 def _version_key(v):
@@ -156,7 +174,6 @@ def _version_key(v):
     if pre:
         return (major, minor, patch, 0, int(pre.group(2)))
     return (major, minor, patch, 1, 0)
-
 
 def perform_update(zip_url, base_dir, lang="zh"):
     """从GitHub仓库ZIP更新整个服务:下载→校验→备份→替换。
@@ -230,7 +247,6 @@ def perform_update(zip_url, base_dir, lang="zh"):
         return True, msg
     except Exception as e:
         return False, (f"更新失败: {e}" if lang == "zh" else f"Update failed: {e}")
-
 
 def plugin_runtime_path():
     """插件运行时路径:优先 CWD/plugin/(可写,支持GitHub更新);
@@ -565,7 +581,6 @@ BEAN_TRANSLATIONS = {
     "洪都拉斯 戈沙·拉萨尔瓦赫瑰夏 · 水洗": "Honduras Gosha La Salvaje Gesha · Washed",
 }
 
-
 def display_name(name, mapping):
     """按当前界面语言翻译名称;静态表 + AI翻译缓存;未知名称原样返回
     Translate a name for the current UI language: static map first, then the AI translation cache"""
@@ -585,10 +600,8 @@ def display_name(name, mapping):
         return cached
     return name
 
-
 def get_text(key):
     return LANGUAGES.get(current_language, LANGUAGES["en"]).get(key, key)
-
 
 # ---------------------------------------------------------------------------
 # AI 翻译设置(DeepSeek):设置持久化 + 自定义语言 + 翻译缓存
@@ -607,7 +620,6 @@ AI_TIMEOUT_BATCH = 30   # 批量UI文案翻译超时 / batch UI-strings timeout 
 
 settings = {"deepseek_key": "", "ai_enabled": False, "languages": {}}
 translation_cache = {}  # {"zh": {"原文": "译文"}}  / per-language cache
-
 
 def load_settings():
     """启动时加载设置与自定义语言 / load settings and custom languages at startup"""
@@ -629,7 +641,6 @@ def load_settings():
         if info.get("strings"):
             LANGUAGES[code] = info["strings"]
 
-
 def save_settings():
     """持久化设置(settings.json 含 API key,已在 .gitignore)"""
     try:
@@ -638,14 +649,12 @@ def save_settings():
     except Exception as e:
         print(f"⚠️ 设置保存失败: {e}")
 
-
 def save_translation_cache():
     try:
         with open(TRANSLATION_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(translation_cache, f, ensure_ascii=False, indent=1)
     except Exception:
         pass
-
 
 def ai_call(messages, timeout=AI_TIMEOUT):
     """调用 DeepSeek,返回响应文本;失败抛异常 / call DeepSeek, returns text"""
@@ -666,7 +675,6 @@ def ai_call(messages, timeout=AI_TIMEOUT):
         resp = json.loads(r.read().decode("utf-8"))
     return resp["choices"][0]["message"]["content"].strip()
 
-
 def clean_bean_text(text):
     """清理豆子信息文本:去掉连字符/间隔符等无效信息,保留数字连字符与单词内连字符
     Clean bean-info text: strip hyphens/separators, keep numeric & word-internal hyphens"""
@@ -681,7 +689,6 @@ def clean_bean_text(text):
     t = re.sub(r"\s+", " ", t)
     t = re.sub(r"^[,，;；\s]+|[,，;；\s]+$", "", t)
     return t.strip()
-
 
 def ai_translate(text, target_lang, allow_api=True):
     """把豆子信息翻译成目标语言;缓存优先,静态表快速路径,失败返回原文
@@ -725,7 +732,6 @@ def ai_translate(text, target_lang, allow_api=True):
         print(f"⚠️ AI 翻译失败(使用原文): {e}")
         return text  # 降级:原文,打印不受影响 / fallback: original text
 
-
 def translate_shot_for_display(shot_data, target_lang, allow_api=True):
     """
     把一条 shot 的展示文案翻成目标语言(豆子信息、方案名),返回新的数据副本。
@@ -758,8 +764,6 @@ def translate_shot_for_display(shot_data, target_lang, allow_api=True):
 
     return shot_data
 
-
-
 # ---------------------------------------------------------------------------
 # 打印调度 / Print dispatch
 # ---------------------------------------------------------------------------
@@ -770,7 +774,6 @@ def translate_shot_for_display(shot_data, target_lang, allow_api=True):
 # it simply hands the 1-bit bitmap from the front end to the adapter for this
 # platform. The adapter is loaded once at startup based on sys.platform.
 from printers import PrintError, get_printer, platform_id  # noqa: E402
-
 
 #: 打印相关设置的默认值 / defaults for the print settings
 PRINT_DEFAULTS = {
@@ -785,7 +788,6 @@ PRINT_DEFAULTS = {
     "rotate": True,
 }
 
-
 def print_config():
     """当前打印配置(默认值 + 已保存的设置)/ current print config (defaults + saved)."""
     cfg = dict(PRINT_DEFAULTS)
@@ -797,11 +799,9 @@ def print_config():
     cfg["raw_supported"] = adapter.supports_raw()
     return cfg
 
-
 def refresh_printer(config=None):
     """重新装载打印适配器(设置改变后调用)/ reload the adapter after a settings change."""
     return get_printer(config, reload=True)
-
 
 # ---------------------------------------------------------------------------
 # 待打印队列 / pending-print queue
@@ -820,7 +820,6 @@ pending_prints = []      # [{"filename":..., "queued": "...", "attempts": n}]
 pending_lock = threading.Lock()
 MAX_PENDING = 50
 
-
 def queue_print_job(filename):
     """把一条 shot 挂进待打印队列 / add a shot to the pending-print queue."""
     with pending_lock:
@@ -836,12 +835,10 @@ def queue_print_job(filename):
         if len(pending_prints) > MAX_PENDING:
             del pending_prints[:-MAX_PENDING]
 
-
 def take_pending_prints():
     """取出待打印队列(不移除,等客户端 ack)/ read the queue without removing."""
     with pending_lock:
         return [dict(j) for j in pending_prints]
-
 
 def ack_pending_print(filename, ok=True):
     """客户端打印完成后确认,把任务摘出队列 / acknowledge a finished job."""
@@ -859,7 +856,6 @@ def ack_pending_print(filename, ok=True):
                 return True
     return False
 
-
 def record_print_job(label, width, height, printer, mode, ok, message=""):
     """把一次打印记进内存队列,供界面显示 / record a print for the UI."""
     job = {
@@ -872,7 +868,6 @@ def record_print_job(label, width, height, printer, mode, ok, message=""):
         print_jobs.append(job)
         if len(print_jobs) > 20:
             del print_jobs[:-20]
-
 
 def print_bitmap(bitmap, width, height, printer=None, **kwargs):
     """
@@ -891,7 +886,6 @@ def print_bitmap(bitmap, width, height, printer=None, **kwargs):
     except Exception as e:
         return {"success": False, "message": str(e), "code": "unexpected"}
 
-
 # ---------------------------------------------------------------------------
 # 停止服务 / stopping the service
 # ---------------------------------------------------------------------------
@@ -908,7 +902,6 @@ def print_bitmap(bitmap, width, height, printer=None, **kwargs):
 # convenient beats being tamper-proof. To tighten it, restrict _allow_shutdown to
 # 127.0.0.1.
 _shutdown_hook = None
-
 
 def show_stop_button():
     """
@@ -943,7 +936,6 @@ def show_stop_button():
     """
     return getattr(sys, "frozen", False) and sys.platform == "darwin"
 
-
 def _allow_shutdown(_client_ip):
     """
     是否允许来自该地址的停止请求 / whether a shutdown request from this address is allowed.
@@ -952,7 +944,6 @@ def _allow_shutdown(_client_ip):
     Currently always allowed. Tighten here rather than anywhere else.
     """
     return True
-
 
 def request_shutdown(delay=0.4):
     """
@@ -967,7 +958,6 @@ def request_shutdown(delay=0.4):
         return False
     threading.Timer(delay, _shutdown_hook).start()
     return True
-
 
 # ---------------------------------------------------------------------------
 # HTTP 服务器 HTTP Server
@@ -1944,7 +1934,6 @@ class PrintTheShotHandler(http.server.SimpleHTTPRequestHandler):
             queue_print_job(filename)
             print("🖨️ 已加入待打印队列 / queued for printing: %s" % filename)
 
-
 # ---------------------------------------------------------------------------
 # 入口 Entry
 # ---------------------------------------------------------------------------
@@ -1977,7 +1966,6 @@ def render_template(text):
     blob = blob.replace("'", "&#39;")
     blob = blob.replace("{VERSION}", VERSION)
     return text.replace("{{LANG}}", blob)
-
 
 def setup_packaged_logging():
     """
@@ -2047,13 +2035,11 @@ def setup_packaged_logging():
     except Exception:
         return None
 
-
 def ensure_directories():
     # 只有数据目录了 —— 不再有图片目录,因为服务端不画图
     # Only the data directory remains: there is no image directory any more
     # because the server draws nothing.
     os.makedirs(DATA_DIR, exist_ok=True)
-
 
 def persist_index():
     """把历史列表写入 shots_data/index.json(重启后恢复用)"""
@@ -2063,7 +2049,6 @@ def persist_index():
                 json.dump(received_shots, f, ensure_ascii=False)
     except Exception as e:
         print(f"⚠️ 持久化失败 / Persist failed: {e}")
-
 
 def load_history():
     """启动时恢复历史:index.json 优先,再扫描目录兜底(崩溃恢复)"""
@@ -2122,7 +2107,6 @@ def load_history():
         received_shots = restored[:5000]
     persist_index()
 
-
 def print_server_info(port):
     import socket
     hostname = socket.gethostname()
@@ -2174,7 +2158,6 @@ def print_server_info(port):
     print("🍳  绘制在浏览器完成,服务端不出图 / rendering happens in the browser")
     print("🍳  Ctrl+C 停止 / Stop")
     print("🍳 " + "=" * 62)
-
 
 def main():
     global PRINT_ENABLED, NO_BROWSER, _shutdown_hook
@@ -2237,7 +2220,6 @@ def main():
         except KeyboardInterrupt:
             pass
         print("\n🛑 服务器已停止 / Server stopped")
-
 
 if __name__ == "__main__":
     main()
