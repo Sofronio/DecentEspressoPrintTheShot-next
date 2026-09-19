@@ -23,6 +23,24 @@ Beta 用 Pillow 在服务端画图,然后把生成的 PNG 送去打印。Next �
 
 ## 下载与运行
 
+### 下载已构建的版本
+
+到 [Releases 页面](https://github.com/Sofronio/DecentEspressoPrintTheShot-next/releases)取对应平台的文件:
+
+| 平台 | 文件 | 操作 |
+|---|---|---|
+| macOS(Apple Silicon) | `PrintTheShotNext-macos-arm64.zip` | 解压 → **先放行一次(见下)** → 双击 |
+| macOS(Intel) | `PrintTheShotNext-macos-intel.zip` | 同上 |
+| Windows | `PrintTheShotNext-windows-x64.exe` | 双击 |
+| Linux | `PrintTheShotNext-linux` | `chmod +x PrintTheShotNext-linux && ./PrintTheShotNext-linux` |
+| Android | `PrintTheShotNext-android.apk` | 安装 APK,首次启动时填服务端地址 |
+
+桌面版是**完整的服务端**:运行之后打开 `http://localhost:8000`。
+Android 版是**客户端** —— 它自身不跑服务端,需要同一网络里有一台机器跑着服务端,
+然后通过蓝牙打印。
+
+### 从源码运行
+
 ```bash
 # 源码运行 —— 不需要安装任何依赖
 python3 print_the_shot_server.py          # 默认 8000 端口

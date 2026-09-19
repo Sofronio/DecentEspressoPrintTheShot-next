@@ -23,6 +23,24 @@ The single most important consequence: **there is exactly one renderer**. macOS 
 
 ## Download & Run
 
+### Pre-built downloads
+
+Grab your platform's file from the [Releases page](https://github.com/Sofronio/DecentEspressoPrintTheShot-next/releases):
+
+| Platform | File | How to run |
+|---|---|---|
+| macOS (Apple Silicon) | `PrintTheShotNext-macos-arm64.zip` | unzip → **allow it once (below)** → double-click |
+| macOS (Intel) | `PrintTheShotNext-macos-intel.zip` | same |
+| Windows | `PrintTheShotNext-windows-x64.exe` | double-click |
+| Linux | `PrintTheShotNext-linux` | `chmod +x PrintTheShotNext-linux && ./PrintTheShotNext-linux` |
+| Android | `PrintTheShotNext-android.apk` | install the APK, then point it at the server (it asks on first run) |
+
+The desktop builds are **complete servers**: run one and open `http://localhost:8000`.
+The Android app is a **client** — it has no server of its own; it needs a desktop (or
+any machine) running the server on the same network, then prints over Bluetooth.
+
+### From source
+
 ```bash
 # from source — no dependencies to install
 python3 print_the_shot_server.py          # default port 8000
