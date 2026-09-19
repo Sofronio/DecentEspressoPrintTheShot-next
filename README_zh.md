@@ -230,8 +230,13 @@ python3 tests/test_server.py
 | 提示 "no printer found" | 先在系统里添加打印机(macOS/Linux 用 CUPS,Windows 用设置) |
 | 提示打印成功但没出纸 | 看打印队列:`lpstat -o`。Raw 队列可以试 `--print-mode raw` |
 | 缩略图空白 | 缩略图是滚动到才画;看浏览器控制台里 `/api/shot` 是不是失败了 |
-| 字体不对 | 内置字体要从 `/fonts/` 加载,检查是不是 404 |
+| 字体不对 | 内置字体要从 `/fonts/` 加载(实际文件在 `web/fonts/`),检查是不是 404 |
 | 更新没生效 | 更新后需要**重启服务端** |
+| **macOS「无法验证开发者」** | 应用未做公证。放行一次即可:`xattr -dr com.apple.quarantine /Applications/PrintTheShot.app`,或到**系统设置 → 隐私与安全性 → 仍要打开**。 |
+| **macOS「已损坏,无法打开」** | **这和上一条不是一回事。** 代码签名校验失败,右键打开也没用,`xattr` 同样**修不了** —— 你拿到的是签名修复之前的构建,请使用当前 Release。 |
+| macOS:双击了但什么都没发生 | 打包版旧版本从 Finder 启动时会崩溃(试图在只读的工作目录旁边创建 `shots_data/`)。已修;旧版本可在终端里、于一个可写目录下直接运行。 |
+| 设置/数据存到哪去了? | 打包版存在 `~/Library/Application Support/PrintTheShot/`(Windows/Linux 为对应路径),**不是**应用旁边。源码运行才用当前目录。 |
+| 找不到窗口可以关掉它 | macOS 打包版刻意没有 Dock 图标、没有窗口。用界面里的红色**停止服务**按钮,或 `pkill -f PrintTheShot.app`。 |
 
 ## 许可证
 
