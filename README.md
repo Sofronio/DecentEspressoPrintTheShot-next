@@ -32,18 +32,27 @@ Open `http://localhost:8000` for the management UI.
 
 There is no `pip install` step: rendering happens in the browser and the printing layer shells out to tools your OS already ships (CUPS on macOS/Linux, the print spooler on Windows).
 
-> **Packaged macOS builds.** The app is not notarized (that needs a paid Apple
-> Developer account), so macOS refuses the first launch with *"cannot be opened
-> because the developer cannot be verified"*. Allow it once:
+> ### macOS packaged build: allow it once before the first launch
+>
+> The app is not notarized (that needs a paid Apple Developer account), so macOS
+> blocks the first launch. Two ways, either works:
+>
+> **Option A — one command** (after moving the app to `/Applications`):
 >
 > ```bash
 > xattr -dr com.apple.quarantine /Applications/PrintTheShot.app
 > ```
 >
-> or **System Settings → Privacy & Security → Open Anyway**.
+> **Option B — through the UI:** try to open it once, then go to
+> **System Settings → Privacy & Security**, scroll to *Security*, and click
+> **Open Anyway**.
 >
-> This is *not* the same as *"the app is damaged"* — that means the code signature
-> itself failed and cannot be bypassed. If you see that, re-download.
+> After that it launches normally, every time. You only do this once per download.
+>
+> > ⚠️ Do not confuse this with *"the app is damaged and can't be opened"*. That is a
+> > different failure: the code signature itself did not validate, and **neither
+> > option above will help** — not even right-click → Open. It means the build
+> > predates the signing fix; use a current release.
 
 ## Architecture
 
@@ -227,6 +236,11 @@ python3 tests/test_server.py
 | Thumbnails blank | They draw on scroll; check the browser console for a failed `/api/shot` |
 | Font looks wrong | The bundled font must load from `/fonts/`; check for a 404 |
 | Update has no effect | Updates need a **server restart** |
+| **macOS: "cannot verify the developer"** | The app is not notarized. Allow it once: `xattr -dr com.apple.quarantine /Applications/PrintTheShot.app`, or **System Settings → Privacy & Security → Open Anyway**. |
+| **macOS: "is damaged and can't be opened"** | **Not the same thing.** The code signature failed to validate and right-clicking will not help. `xattr` does **not** fix this either — you have a build from before the signing fix. Use a current release. |
+| macOS: app opens but nothing happens | The packaged app used to crash when launched from Finder (it tried to create `shots_data/` next to a read-only working directory). Fixed; on an older build, run the binary from a terminal in a writable directory. |
+| Where did my settings/data go? | Packaged builds store them in `~/Library/Application Support/PrintTheShot/` (the equivalent on Windows/Linux), **not** next to the app. Source runs use the current directory. |
+| Can't find any window to close it | A packaged macOS build has no Dock icon and no window by design. Use the red **Stop service** button in the web UI, or `pkill -f PrintTheShot.app`. |
 
 ## License
 
