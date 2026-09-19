@@ -124,10 +124,38 @@ GITHUB_ZIP_URL = "https://codeload.github.com/Sofronio/DecentEspressoPrintTheSho
 
 
 def _version_key(v):
-    """'2.0-beta' -> (2, 0);用于比较远端与本地版本"""
+    """
+    把版本号解析成可比较的元组 / parse a version string into something comparable.
+
+    原来只取 major.minor,于是 '2.0-beta.2' 和 '2.0-beta.3' 都变成 (2, 0),
+    比较结果相等 —— 「检查更新」会告诉 beta.2 的用户「已是最新」,而实际上不是。
+    预发布版本更新得越勤,这个 bug 越致命。
+
+        '2.0-beta.2' -> (2, 0, 0, 0, 2)
+        '2.0-beta.3' -> (2, 0, 0, 0, 3)     比上面大
+        '2.0'        -> (2, 0, 0, 1, 0)     正式版排在所有同名预发布之后
+        '2.1-next.1' -> (2, 1, 0, 0, 1)
+
+    第四位是「是否正式版」的哨兵:0 = 预发布,1 = 正式版。
+
+    The old version took only major.minor, so '2.0-beta.2' and '2.0-beta.3' both
+    became (2, 0) and compared equal — "check for updates" told beta.2 users they
+    were already current when they were not.
+
+    The prerelease number is now part of the comparison. The fourth element is a
+    sentinel: 0 for a prerelease, 1 for a final release.
+    """
     import re
-    m = re.match(r"(\d+)\.(\d+)", v or "")
-    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+    v = (v or "").strip()
+    m = re.match(r"(\d+)\.(\d+)(?:\.(\d+))?", v)
+    if not m:
+        return (0, 0, 0, 0, 0)
+    major, minor = int(m.group(1)), int(m.group(2))
+    patch = int(m.group(3) or 0)
+    pre = re.search(r"(alpha|beta|rc|next|pre)[.\-]?(\d+)", v, re.I)
+    if pre:
+        return (major, minor, patch, 0, int(pre.group(2)))
+    return (major, minor, patch, 1, 0)
 
 
 def perform_update(zip_url, base_dir, lang="zh"):
