@@ -2,7 +2,109 @@
 
 [中文](CHANGELOG_zh.md) | English
 
-## 2.1-next.1
+## 2.1-beta.2
+
+The release that made the Android app a server in its own right, reversing the client
+shape shipped in 2.1-beta.1. The tablet now receives shots straight from the DE1,
+renders them, and prints over Bluetooth — with no computer anywhere in the path.
+
+### Changed
+
+- **The Android app is now a complete server, not a client.** The previous build made
+  the APK a client that connected to a desktop server; that was the wrong shape for
+  this project, whose goal is a self-contained print node. Client mode and its
+  server-address setup screen are gone entirely.
+- **The routes mirror the desktop server**, so the same DE1 plugin configuration works
+  against either end.
+
+### Added
+
+- `android/.../server/MiniHttpServer.java` — a hand-written HTTP server on
+  `java.net.ServerSocket`, no dependencies. A library such as NanoHTTPD was rejected
+  deliberately: the native sources are overlaid onto a Capacitor-generated project and
+  this repository has no `build.gradle` in which to pin a dependency, so adding one
+  would mean an implicit prerequisite that cannot be version-controlled.
+- `android/.../server/AppServer.java` — routes: web UI, `/upload`, history, statistics,
+  the pending-print queue, the printer list, `/api/print`.
+- `android/.../server/ShotStore.java` — app-private storage (`getFilesDir`), so the app
+  never requests a storage permission. Filenames carry a microsecond ID so two shots
+  uploaded within the same second cannot collide.
+- `android/.../server/DeviceInfo.java` — LAN address detection that enumerates
+  interfaces and **excludes tunnel interfaces**, rather than the common "connect to
+  8.8.8.8 and read back the source address" trick. That trick returns the VPN address
+  whenever a VPN is up, and the user then types an address that cannot be reached — the
+  desktop build hit exactly this.
+- `android/.../server/ServerHolder.java` — one place for the service lifecycle, so an
+  Activity recreation cannot start a second server. Reads the version from
+  `strings.js`, so the native layer and the front end cannot disagree about it.
+- The status card shows the tablet's LAN address, ready to paste into the DE1 plugin.
+
+### Removed
+
+- Client mode: `setServerBase()`, `needsServerConfig`, and the first-run server-address
+  screen.
+- **The "stop service" button does not appear on Android.** There is no terminal on a
+  tablet, and stopping the service is equivalent to killing the app.
+
+### Fixed
+
+- **The packaged build no longer ships a literal `{{VERSION}}` in its page title.**
+  Cosmetic on Android, since the WebView does not display the title, but wrong.
+- **Template substitution is now limited to files under `web/`.** It previously applied
+  to any `.html` / `.js` / `.css`, including the test pages under `tests/` — where it
+  rewrote placeholder literals that existed as *assertion content*. One assertion
+  holding `'{{VERSION}}'` had its literal replaced with the real version, so it silently
+  became "the title must not contain 2.1-beta.1" and could never pass. The file looked
+  perfectly normal throughout.
+
+### Design notes
+
+- **`/api/print` takes the complete ESC/POS byte stream, not a bitmap.** The protocol is
+  assembled in exactly one place (`web/printer.js`, byte-for-byte with
+  `printers/escpos.py`). Reimplementing it in Java would create a second place to drift,
+  and the symptom would be "prints sent over the LAN differ from prints made from the
+  app".
+- **No template substitution in Java** — the front end resolves `{{VERSION}}` and
+  `{{LANG}}` itself, verified on both the browser and the APK paths.
+- **Desktop-only features return an empty result that explains itself, not a 404.** AI
+  translation and online update are not implemented on Android; the front end calls
+  those endpoints, and "this endpoint does not exist" and "this build does not have this
+  feature" are different things.
+- **The WebView still loads from APK assets** and talks to `http://localhost:8000` over
+  CORS, rather than pointing Capacitor's `server.url` at the loopback — which keeps the
+  working Bluetooth bridge untouched, and leaves the page renderable (reporting that it
+  cannot connect) instead of blank when the service is not up.
+
+### Verification
+
+| Suite | Tests | Coverage |
+|---|---|---|
+| front-end JS syntax | 5 files | one bad paren = a blank UI |
+| `tests/test_printers.py` | 18 | ESC/POS header, PBM/BMP encoding, validation |
+| `tests/test_platform_dispatch.py` | 20 | platform detection, localised `lpstat`, Windows payload |
+| `tests/test_server.py` | 22 | HTTP API, upload → history → queue, dispatch, exposure |
+| `tests/test_cups_e2e.py` | 3 | **a real CUPS round trip**, bytes compared |
+| `tests/web_test.html` | 36 | renderer maths, bitmap packing, the whole print API |
+| `tests/ui_test.html` | 22 | the real UI in a real browser |
+| `tests/apk_sim.html` | 11 | the APK code path (bundled assets, no client mode) |
+
+132 tests in total, all passing.
+
+**Verified on real hardware** — a Samsung SM-X210 running Android 16, on a real LAN:
+
+- the tablet serves port 8000 to the LAN; `http://192.168.1.225:8000/` returned 200
+  when requested from a Mac
+- every static asset was retrievable, including the 16 MB font
+- `POST /upload` succeeded — the shot was stored, parsed into a bean and a profile, and
+  queued for printing
+- the UI showed the tablet's own LAN address, the data card appeared, and the Canvas
+  thumbnail rendered
+
+**Not verified**: no printer and no DE1 were available, so the SPP handshake, the
+512-byte chunking with a 20 ms gap, and the whole ESC/POS byte layout remain untested
+against paper. The permission flows ran on Android 16 only, not on 12, 13 or 14.
+
+## 2.1-beta.1
 
 The release that moved drawing out of the server and made the printing layer
 pluggable. This is a structural change rather than a feature release: almost
