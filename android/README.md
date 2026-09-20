@@ -356,19 +356,31 @@ the app can start it. `POST_NOTIFICATIONS` denial only hides the notification.
 
 Useful log filter: `adb logcat -s PrintTheShotNext`.
 
-## 10. What is not verified
+## 10. What is verified, and what is not
 
-Being explicit, since there was no printer to test with:
+**Verified on a real device** — a Samsung SM-X210 running Android 16, on a real LAN:
+
+- the tablet serves port 8000 to the LAN; `http://192.168.1.225:8000/` returned 200
+  when requested from a Mac
+- every static asset was retrievable, including the 16 MB font
+- `POST /upload` succeeded — the shot was stored, parsed into a bean and a profile,
+  and queued for printing
+- the UI showed the tablet's own LAN address, the data card appeared, and the Canvas
+  thumbnail rendered
+- the full automated suite passes: 7 groups, 132 assertions
+
+**Not verified.** No printer and no DE1 were available:
 
 - **Never executed on a real printer.** The SPP handshake, the 512-byte chunking
   with a 20 ms gap, and the assumption that printers accept the insecure-RFCOMM
-  variant all need hardware confirmation.
-- **Never executed on a real Android device.** The permission flows are gated to
-  the correct API levels by construction and follow the documented Capacitor and
-  Android APIs, but they have not been exercised on Android 12, 13 or 14.
+  variant still need hardware confirmation. The byte layouts are covered by
+  automated tests; paper is not.
+- **The permission flows ran on Android 16 only.** They are gated to the correct API
+  levels by construction and follow the documented Capacitor and Android APIs, but
+  they have not been exercised on Android 12, 13 or 14.
 - **Compile status**: the Java sources compile cleanly against Java 8 and Java 17
   targets (with `-Xlint:all`), and the ESC/POS constants are covered by a unit
-  smoke test. Everything else is static review.
+  smoke test.
 - **The overlay step is manual.** There is no script keeping `app/src/main/` in
   sync with the generated project; re-copy after editing (or edit the generated
   copy directly).

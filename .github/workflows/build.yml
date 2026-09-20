@@ -178,9 +178,45 @@ jobs:
     needs: [build, android]
     runs-on: ubuntu-latest
     steps:
+      # 必须先 checkout:release 正文取自仓库里的 docs/RELEASE_NOTES.md,
+      # 而下面这些步骤默认跑在一个没有工作区的 runner 上。
+      #
+      # Checkout first: the release body is read from docs/RELEASE_NOTES.md in the
+      # repository, and the runner has no working tree otherwise.
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Check release notes are current
+        run: |
+          set -e
+          NOTES=docs/RELEASE_NOTES.md
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          # 两道检查,因为「空正文」和「正文没更新」是两种不同的失误:
+          # v2.1-beta.2 就是空着发出去的 —— 一个没有任何说明的 Release,而没人发现。
+          #
+          # Two checks, because "empty body" and "body not updated" are different
+          # mistakes. v2.1-beta.2 went out with an empty body — a release with no
+          # description at all — and nothing caught it.
+          if [ ! -s "$NOTES" ]; then
+            echo "::error::$NOTES 不存在或为空 / does not exist or is empty"
+            exit 1
+          fi
+
+          # 只检查「非空」不够:忘了更新的话,会把上一个版本的说明原样发出去。
+          # 因此要求正文必须提到本次的版本号。
+          #
+          # Non-empty is not enough: forgetting to update would republish the previous
+          # release's notes verbatim. So require it to mention this release's version.
+          if ! grep -qF "$VERSION" "$NOTES"; then
+            echo "::error::$NOTES 没有提到 $VERSION —— 发布前请更新 / does not mention $VERSION — update it before tagging"
+            exit 1
+          fi
+
+          echo "✅ 发布说明已就绪 / release notes ready: $VERSION"
 
       - name: Prepare release files
         run: |
@@ -207,3 +243,12 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*
+          # 不写 body: 也不开 generate_release_notes —— 两者都试过,前者是空的,
+          # 后者生成的英文提交列表和这个项目的双语文档风格对不上。
+          # 正文一律以 docs/RELEASE_NOTES.md 为准,发版前先更新它。
+          #
+          # Neither `body:` nor `generate_release_notes` — the first gives an empty
+          # body, the second produces an English-only commit list that does not match
+          # this project's bilingual docs. The body always comes from
+          # docs/RELEASE_NOTES.md, which is updated before tagging.
+          body_path: docs/RELEASE_NOTES.md
