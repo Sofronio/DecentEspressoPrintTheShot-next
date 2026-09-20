@@ -129,71 +129,36 @@
   // =========================================================================
   // 服务端地址 / server address
   // =========================================================================
-  // 这一块是 Android 上最容易搞错的地方,值得说清楚。
+  // 桌面浏览器:页面本身就是服务端发的,同源,相对路径即可 —— 什么都不用配。
   //
-  // 桌面浏览器:页面就是从 Python 服务端拿的,所以相对路径 `/api/status` 正好打回
-  // 同一个服务端 —— 什么都不用配。
+  // Android:**平板自己就是服务端**(App 内跑着一个 HTTP 服务,见
+  // android/app/src/main/java/com/printtheshot/server/)。所以这里固定指向
+  // 本机 8000,没有任何需要用户配置的东西。
   //
-  // Android APK:Web UI 是**打包在 APK 里**的,WebView 以 http://localhost 加载它。
-  // 这时候相对路径 `/api/status` 会打到 WebView 自己身上(asset 目录里没有 /api),
-  // 而不是局域网里的服务端。所以必须先知道服务端在哪,把地址补成绝对 URL。
+  // 之前这里是「填一个桌面服务端的地址」的客户端模式,已经去掉 —— 平板不再需要
+  // 依附于电脑,它自己就是一个完整的打印节点。
   //
-  // 配置存在 localStorage,由首次启动的设置页写入。
+  // Desktop browser: the page came from the server, so same-origin and a relative
+  // path is all that is needed — nothing to configure.
   //
-  // This is the single easiest thing to get wrong on Android, so it is worth being
-  // explicit.
+  // Android: **the tablet is its own server** (an HTTP service runs inside the app,
+  // see android/app/src/main/java/com/printtheshot/server/). So this points at
+  // localhost:8000 and there is nothing for the user to configure.
   //
-  // Desktop browser: the page itself came from the Python server, so a relative
-  // `/api/status` goes right back to that same server — nothing to configure.
-  //
-  // Android APK: the web UI is **bundled inside the APK** and the WebView loads it
-  // from http://localhost. A relative `/api/status` then hits the WebView itself
-  // (there is no /api in the asset directory) rather than the server on the LAN.
-  // The server address must therefore be known and turned into an absolute URL.
-  //
-  // The value lives in localStorage and is written by the first-run setup screen.
-  var SERVER_KEY = 'pts_server_base';
-
-  /** 把用户输入的地址规整成 "http://host:port" / normalise user input into a base URL. */
-  function normalizeBase(input) {
-    var u = String(input || '').trim();
-    if (!u) return '';
-    if (!/^https?:\/\//i.test(u)) u = 'http://' + u;
-    return u.replace(/\/+$/, '');
-  }
+  // This used to be a client mode with a field for a desktop server's address. That
+  // is gone: the tablet no longer depends on a computer, it is a complete printing
+  // node by itself.
+  var ANDROID_SELF_BASE = 'http://localhost:8000';
 
   function getServerBase() {
-    try { return normalizeBase(global.localStorage.getItem(SERVER_KEY)); }
-    catch (e) { return ''; }
+    return isNative() ? ANDROID_SELF_BASE : '';
   }
 
-  function setServerBase(input) {
-    var u = normalizeBase(input);
-    try {
-      if (u) global.localStorage.setItem(SERVER_KEY, u);
-      else global.localStorage.removeItem(SERVER_KEY);
-    } catch (e) { /* 隐私模式下写不进去 / localStorage can be unavailable */ }
-    return u;
-  }
-
-  /**
-   * 需要配置服务端地址吗 / does the server address need configuring.
-   * 只有原生端需要;浏览器里永远不需要。
-   * Only on native; never in a browser.
-   */
-  function needsServerConfig() {
-    return isNative() && !getServerBase();
-  }
-
-  /**
-   * 把 API 路径解析成可以直接 fetch 的 URL。
-   * Resolve an API path into a URL that can be fetched directly.
-   */
+  /** 把 API 路径解析成可以直接 fetch 的 URL。 */
+  /** Resolve an API path into a URL that can be fetched directly. */
   function apiUrl(path) {
     if (!isNative()) return path;      // 浏览器:同源,直接用 / same origin, use as-is
-    var base = getServerBase();
-    if (!base) return path;            // 还没配;调用方应先调 needsServerConfig()
-    return base + path;
+    return ANDROID_SELF_BASE + path;
   }
 
   // =========================================================================
@@ -482,8 +447,6 @@
     transport: transport,
     apiUrl: apiUrl,
     getServerBase: getServerBase,
-    setServerBase: setServerBase,
-    needsServerConfig: needsServerConfig,
     getConfig: getConfig,
     saveConfig: saveConfig,
     loadShot: loadShot,

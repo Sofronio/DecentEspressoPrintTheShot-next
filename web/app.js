@@ -246,87 +246,6 @@ function url(path) {
   return PrintTheShotPrinter.apiUrl(path);
 }
 
-// ---------------------------------------------------------------------------
-// 首次启动:配置服务端地址 / first run: configure the server address
-// ---------------------------------------------------------------------------
-// 只在 Android 上会走到这里。浏览器里 Web UI 就是从服务端拿的,天然知道地址;
-// APK 里 Web UI 是打包进去的,必须问用户服务端在哪。
-//
-// 这一屏不做成「设置里的一项」而是启动就拦,是因为不配的话整个界面什么都显示不
-// 出来 —— 让用户自己去设置页找一个能修好白屏的开关,不如直接把问题摆出来。
-//
-// Only reached on Android. In a browser the web UI came from the server so the
-// address is known; inside the APK the UI is bundled and the server has to be asked
-// for.
-//
-// It gates startup rather than living in settings because without it nothing renders
-// at all: making the user hunt through a settings page for the switch that fixes a
-// blank screen is worse than stating the problem outright.
-
-const SERVER_PRESETS = [
-  { host: location.hostname && location.hostname !== 'localhost' ? location.hostname : '', port: 8000 }
-];
-
-function showServerSetup() {
-  const overlay = document.createElement('div');
-  overlay.className = 'lightbox show';
-  overlay.id = 'server-setup';
-  overlay.innerHTML = `
-    <div class="lb-wrap t-modal" style="max-width:420px">
-      <h3 style="margin-bottom:6px;color:#333">${T('setup_title')}</h3>
-      <p style="font-size:13px;color:var(--muted);margin-bottom:12px">${T('setup_hint')}</p>
-      <input id="setup-url" placeholder="192.168.1.100:8000" autocomplete="off"
-             style="width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box;font-size:14px">
-      <div style="display:flex;gap:8px;margin-top:12px">
-        <button class="btn" id="setup-go">${T('setup_connect')}</button>
-      </div>
-      <div class="note" id="setup-note" style="margin-top:10px"></div>
-    </div>`;
-  document.body.appendChild(overlay);
-
-  const input = overlay.querySelector('#setup-url');
-  const note = overlay.querySelector('#setup-note');
-  const btn = overlay.querySelector('#setup-go');
-  input.focus();
-
-  async function attempt() {
-    const raw = input.value.trim();
-    if (!raw) { note.textContent = '❌ ' + T('setup_required'); return; }
-    btn.disabled = true;
-    btn.textContent = '⏳';
-    note.textContent = '⏳ ' + T('setup_testing');
-    // 先存下来再测:apiUrl() 是从存储里读地址的
-    // Store first, then test: apiUrl() reads the address from storage
-    PrintTheShotPrinter.setServerBase(raw);
-    try {
-      const r = await fetch(PrintTheShotPrinter.apiUrl('/api/status'));
-      const j = await r.json();
-      if (!j || !j.version) throw new Error('unexpected response');
-      note.textContent = '✅ ' + T('setup_ok').replace('{v}', j.version);
-      setTimeout(() => location.reload(), 700);
-    } catch (e) {
-      // 连不上就把地址清掉,免得留下一个半好不好的配置
-      // Clear it on failure rather than leaving a half-working configuration behind
-      PrintTheShotPrinter.setServerBase('');
-      note.textContent = '❌ ' + T('setup_failed') + ' ' + (e.message || '');
-      btn.disabled = false;
-      btn.textContent = T('setup_connect');
-    }
-  }
-
-  btn.addEventListener('click', attempt);
-  input.addEventListener('keydown', e => { if (e.key === 'Enter') attempt(); });
-}
-
-// 已经配好了,但想在设置里改 / already configured, but let the user change it
-function changeServer() {
-  const cur = PrintTheShotPrinter.getServerBase();
-  const next = prompt(T('setup_prompt'), cur);
-  if (next === null) return;
-  PrintTheShotPrinter.setServerBase(next);
-  location.reload();
-}
-
 async function loadStatus() {
   const s = await api('/api/status');
   document.getElementById('subtitle').textContent = `${T('status_running')} · v${s.version}`;
@@ -354,6 +273,24 @@ async function loadStatus() {
   // 只有 macOS 打包版才需要这个按钮(见服务端 show_stop_button 的说明)
   // Only a packaged macOS build needs this button; see show_stop_button
   document.getElementById('btn-shutdown').style.display = s.show_stop_button ? '' : 'none';
+  // 平板的局域网地址 —— 用户要把它填进 DE1 插件,把 shot 传到这台平板上。
+  // 这是整个界面上最需要被看到的一行:没有它,用户不知道该往哪儿传数据。
+  //
+  // The tablet's LAN address: the user types it into the DE1 plugin so shots are
+  // uploaded here. It is the most important line on the screen — without it there is
+  // nowhere to send anything.
+  if (s.lan_url && !document.getElementById('lan-address')) {
+    const box = document.getElementById('status-grid');
+    if (box) {
+      const div = document.createElement('div');
+      div.className = 'stat';
+      div.id = 'lan-address';
+      div.innerHTML = '<div class="label">' + T('lan_address_label') + '</div>'
+        + '<div class="value" style="font-size:15px;word-break:break-all">' + s.lan_url + '</div>'
+        + '<div class="label" style="margin-top:4px">' + T('lan_address_hint') + '</div>';
+      box.appendChild(div);
+    }
+  }
   document.getElementById('btn-print').textContent = s.print_enabled ? T('disable_print') : T('enable_print');
   document.getElementById('btn-print').classList.toggle('green', !s.print_enabled);
   document.getElementById('btn-bean').textContent = s.bean_info_enabled ? T('disable_bean_info') : T('enable_bean_info');
@@ -784,15 +721,39 @@ document.getElementById('drop-file').addEventListener('change', e => {
 
 async function uploadFile(file) {
   const text = await file.text();
-  const r = await fetch('/upload', { method: 'POST', headers: {'Content-Type':'application/json'}, body: text });
-  const j = await r.json();
+  // 必须走 apiUrl() —— 打包进 APK 时 Web UI 不在服务端上,裸的 '/upload' 会打到
+  // WebView 自己身上。浏览器里 apiUrl() 原样返回,行为不变。
+  //
+  // Must go through apiUrl(): inside the APK the web UI is not served by the server,
+  // so a bare '/upload' hits the WebView itself. In a browser apiUrl() returns the
+  // path unchanged, so behaviour there is the same as before.
+  let r, j;
+  try {
+    r = await fetch(PrintTheShotPrinter.apiUrl('/upload'),
+                    { method: 'POST', headers: {'Content-Type':'application/json'}, body: text });
+    j = await r.json();
+  } catch (e) {
+    // 网络层直接失败(地址填错 / 服务端没开)时给出可操作的信息,
+    // 而不是让用户对着一个 "Failed to fetch" 猜
+    // When the request fails outright (wrong address, server not running), say
+    // something actionable instead of leaving the user to decode "Failed to fetch"
+    toast('❌ ' + T('upload_failed') + ' ' + (e.message || e));
+    return;
+  }
   toast(j.status === 'success' ? `${T('upload_success')}: ${j.message}` : '❌ ' + (j.message || j.error || ''));
   setTimeout(refreshAll, 1500);
 }
 
 // 初始化文案
 function initText() {
-  document.getElementById('title').textContent = T('server_title').replace('{VERSION}', L.__version || '');
+  // 版本号优先用服务端注入的;打包进 APK 时没人注入,就退回 strings.js 里带的
+  // PTS_VERSION —— 否则标题是「PrintTheShot Next 服务器 v」,后面空着。
+  //
+  // Version from the server's injection when present; inside the APK nothing injects
+  // it, so fall back to PTS_VERSION from strings.js — otherwise the title reads
+  // "PrintTheShot Next Server v" with nothing after the v.
+  document.getElementById('title').textContent =
+    T('server_title').replace('{VERSION}', L.__version || window.PTS_VERSION || '');
   document.getElementById('h-status').textContent = '📊 ' + T('print_control');
   document.getElementById('h-queue').textContent = T('print_queue');
   document.getElementById('h-upload').textContent = '📤 ' + T('data_upload');
@@ -805,6 +766,15 @@ function initText() {
   document.getElementById('btn-plugin').textContent = T('plugin_local');
   document.getElementById('btn-plugin-github').textContent = T('plugin_github');
   document.getElementById('btn-plugin-txt').textContent = T('plugin_txt');
+  // 插件下载同样来自服务端,链接也必须补成绝对地址 —— 否则在 APK 里点下载会
+  // 404(它指向的是 WebView 自己的资源目录)
+  // The plugin download also comes from the server, so the links need absolute
+  // URLs too — otherwise tapping download in the APK 404s against the WebView's own
+  // asset directory.
+  const p1 = document.getElementById('btn-plugin');
+  const p2 = document.getElementById('btn-plugin-txt');
+  if (p1) p1.href = url('/plugin/plugin.tcl');
+  if (p2) p2.href = url('/plugin/plugin.tcl.txt');
   document.getElementById('plugin-note').textContent = T('plugin_note');
   document.getElementById('h-update').textContent = '🔄 ' + T('update_title');
   document.getElementById('h-ai-settings').textContent = '🤖 ' + T('h_ai_settings');
@@ -825,27 +795,39 @@ function initText() {
   if (hPrint) hPrint.textContent = T('h_print');
 }
 
-initText();
-initLangSwitcher();
-initLangPresets();
-loadAiSettings();
-refreshAll();
-window.__refreshTimer = setInterval(refreshAll, 8000);
+/**
+ * 启动界面 / start the UI.
+ *
+ * 抽成函数是因为下面那个分支要在「还没配置服务端地址」时把它整个跳过。
+ * Wrapped in a function because the branch below has to skip all of it when the
+ * server address has not been configured yet.
+ */
+function startApp() {
+  initText();
+  initLangSwitcher();
+  initLangPresets();
+  loadAiSettings();
+  refreshAll();
+  window.__refreshTimer = setInterval(refreshAll, 8000);
 
-// ---------- 打印初始化 / Printing bootstrap ----------
-// 上传到达的 shot 由前端这边渲染并打印(服务端手里没有图),所以这里要起一个
-// 轮询把待打印队列拉下来。间隔 5 秒 —— 足够及时,又不至于把服务端问烦。
-//
-// Arriving shots are rendered and printed by this end (the server has no image),
-// so a poll drains the pending-print queue. Five seconds is prompt enough without
-// pestering the server.
-PrintTheShotRender.ensureFontReady().then(() => {
   PrintTheShotPrinter.startAutoPrint(5000);
   initPrintSettings();
   // 蓝牙设置卡片只在 Android 上有内容,桌面浏览器里 bt.js 会把它隐藏掉
   // The Bluetooth card only has content on Android; bt.js hides it in a browser
   if (window.PrintTheShotBluetooth) PrintTheShotBluetooth.mount();
-});
+}
+
+// ---------------------------------------------------------------------------
+// 启动 / startup
+// ---------------------------------------------------------------------------
+// Android 上不再需要问「服务端在哪」—— 平板自己就是服务端(App 内跑着一个
+// HTTP 服务,见 android/.../server/),printer.js 里已经把地址固定成本机。
+// 页面上没有需要用户填地址的地方,直接启动即可。
+//
+// No more "where is the server" on Android: the tablet is its own server (an HTTP
+// service runs inside the app; see android/.../server/), and printer.js already pins
+// the address to localhost. There is nothing for the user to type; just start.
+PrintTheShotRender.ensureFontReady().then(startApp);
 
 /** 打印设置卡片:显示平台、打印机、模式 / the print settings card. */
 async function initPrintSettings() {

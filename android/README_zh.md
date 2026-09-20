@@ -41,16 +41,29 @@ ESC/POS 插件打印到**蓝牙热敏小票机**,手机上不需要再跑 Python
 ## 1. 整体结构
 
 ```
-web/index.html + app.js + render.js     现成的 Web UI(和桌面端共用同一份)
-        │  base64 的 ESC/POS 字节流
-        ▼
-Capacitor.Plugins.PrintTheShotPrinter   原生插件      ─┐
-BluetoothPrinterBridge(pyjnius)         静态入口      ─┼─► BluetoothPrinter(同一条 socket)
-LocalPrintBridge(127.0.0.1:9100)        本机 HTTP 桥  ─┘
-        │  经典蓝牙 SPP
-        ▼
-热敏小票机(ESC/POS)
+        ┌─────────────────────────── 平板自己就是服务端 ──────────────────────────────┐
+        │                                                                            │
+DE1 ──► │  :8000  MiniHttpServer(Java 手写,零依赖)                                   │
+        │           ├── 从 APK 资源里提供 Web UI                                       │
+        │           ├── POST /upload      → ShotStore(应用私有目录)                    │
+        │           └── /api/*            → 历史、统计、待打印队列                       │
+        │                    ▲                                                       │
+        │                    │ CORS                                                 │
+        │  Capacitor WebView │  web/index.html + app.js + render.js                  │
+        │                    │  轮询待打印队列,在 canvas 上渲染曲线                     │
+        │                    ▼                                                       │
+        │                base64 的 ESC/POS 字节流                                     │
+        │                    ▼                                                       │
+        │  Capacitor.Plugins.PrintTheShotPrinter ─┐                                  │
+        │  BluetoothPrinterBridge(pyjnius)        ─┼─► BluetoothPrinter(同一条 socket)│
+        │  LocalPrintBridge(127.0.0.1:9100)       ─┘                                 │
+        │                    │ 经典蓝牙 SPP                                          │
+        │                    ▼                                                       │
+        │             热敏小票机(ESC/POS)                                            │
+        └────────────────────────────────────────────────────────────────────────────┘
 ```
+
+DE1 直接往平板上传,别的什么都不需要。
 
 Web UI 负责拼出**完整**的字节流 —— 复位 → `GS v 0` 光栅位图 → 走纸 → 切纸 —— 原生层
 把它原样写进蓝牙 socket,一个字节都不解析、不追加:字节怎么组装只由一个地方决定。

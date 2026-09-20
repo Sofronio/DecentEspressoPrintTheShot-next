@@ -33,11 +33,12 @@ Grab your platform's file from the [Releases page](https://github.com/Sofronio/D
 | macOS (Intel) | `PrintTheShotNext-macos-intel.zip` | same |
 | Windows | `PrintTheShotNext-windows-x64.exe` | double-click |
 | Linux | `PrintTheShotNext-linux` | `chmod +x PrintTheShotNext-linux && ./PrintTheShotNext-linux` |
-| Android | `PrintTheShotNext-android.apk` | install the APK, then point it at the server (it asks on first run) |
+| Android | `PrintTheShotNext-android.apk` | install — it is its own server and shows its LAN address |
 
-The desktop builds are **complete servers**: run one and open `http://localhost:8000`.
-The Android app is a **client** — it has no server of its own; it needs a desktop (or
-any machine) running the server on the same network, then prints over Bluetooth.
+**Every build is a complete server, Android included.** Run any of them and open
+`http://localhost:8000` — or, on Android, the app opens its own UI and also shows its
+LAN address so the DE1 uploads straight to the tablet. There is no client mode and no
+companion machine required.
 
 ### From source
 

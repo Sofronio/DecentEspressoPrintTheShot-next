@@ -30,19 +30,36 @@ check('L 有内容 / L is populated', L && Object.keys(L).length > 50, L ? Objec
 check('L.__code 推断为 zh(系统语言)/ guessed zh from the system language', L.__code === 'zh', L.__code);
 check('文案是中文而不是 key / strings are words, not keys', L.status_running && L.status_running !== 'status_running', L.status_running);
 check('platform detection works', window.PrintTheShotPrinter && window.PrintTheShotPrinter.isNative() === true);
-check('needsServerConfig() is true before configuration', PrintTheShotPrinter.needsServerConfig() === true);
-check('apiUrl falls back to the raw path when unconfigured', PrintTheShotPrinter.apiUrl('/api/status') === '/api/status');
-PrintTheShotPrinter.setServerBase('192.168.1.100:8000');
-check('setServerBase normalises to http://', PrintTheShotPrinter.getServerBase() === 'http://192.168.1.100:8000', PrintTheShotPrinter.getServerBase());
-check('apiUrl now produces an absolute URL', PrintTheShotPrinter.apiUrl('/api/status') === 'http://192.168.1.100:8000/api/status', PrintTheShotPrinter.apiUrl('/api/status'));
-PrintTheShotPrinter.setServerBase('https://coffee.example.com');
-check('https base is preserved', PrintTheShotPrinter.apiUrl('/api/status') === 'https://coffee.example.com/api/status', PrintTheShotPrinter.apiUrl('/api/status'));
-PrintTheShotPrinter.setServerBase('https://coffee.example.com/');
-check('trailing slash is trimmed', PrintTheShotPrinter.apiUrl('/api/status') === 'https://coffee.example.com/api/status');
-PrintTheShotPrinter.setServerBase('');
-check('needsServerConfig() true again after clearing', PrintTheShotPrinter.needsServerConfig() === true);
-// app.js 必须把标题里的 {{VERSION}} 补上 —— APK 里没人替换它
-// app.js must fill in {{VERSION}} in the title; nothing does inside the APK
+// Android 上 apiUrl 必须指向平板自己的服务(App 内跑着 MiniHttpServer)。
+// 之前这里测的是「填一个桌面服务端地址」的客户端模式,那个模式已经去掉 ——
+// 平板自己就是服务端,没有需要用户配置的东西。
+//
+// On Android apiUrl must point at the tablet's own service (MiniHttpServer runs
+// inside the app). This used to test the client mode with a configurable desktop
+// address; that is gone — the tablet is its own server and nothing needs configuring.
+check('apiUrl 指向本机服务 / apiUrl points at the device itself',
+  PrintTheShotPrinter.apiUrl('/api/status') === 'http://localhost:8000/api/status',
+  PrintTheShotPrinter.apiUrl('/api/status'));
+check('服务端基址是本机 8000 / the base is localhost:8000',
+  PrintTheShotPrinter.getServerBase() === 'http://localhost:8000',
+  PrintTheShotPrinter.getServerBase());
+check('不再暴露 setServerBase(客户端模式已移除)/ client-mode API is gone',
+  typeof PrintTheShotPrinter.setServerBase === 'undefined');
+check('不再暴露 needsServerConfig / the config gate is gone',
+  typeof PrintTheShotPrinter.needsServerConfig === 'undefined');
+
+// ★ 这条断言就是漏掉的那个缺口:设置页定义了但从来没人调用,于是 APK 里
+//   根本没有输入服务端地址的地方,所有请求都打到 WebView 自己身上。
+//   之前只测了 needsServerConfig() 这个「判断函数」是对的,没测界面有没有
+//   真的被拉起来 —— 函数对、接线错,照样是坏的。
+// ★ This is the assertion that was missing: the setup screen was defined but never
+//   called, so the APK had nowhere to enter the server address and every request
+//   hit the WebView itself. The old test checked that needsServerConfig() returned
+//   the right value but never that the UI actually appeared — right helper, wrong
+//   wiring, still broken.
+var _setup = document.getElementById('server-setup');
+check('不再有服务端地址设置页 / the address setup screen is gone', !_setup);
+
 // 占位符在运行时拼出来,不写成字面量 —— 服务端会替换掉页面里的 {{VERSION}},
 // 把它写死在断言里的话,断言会在发送途中被改写成别的东西。
 // Build the placeholder at run time rather than as a literal: the server substitutes

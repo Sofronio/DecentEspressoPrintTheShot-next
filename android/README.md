@@ -52,16 +52,29 @@ it is, and only the internals of `BluetoothPrinter` change.
 ## 1. How it fits together
 
 ```
-web/index.html + app.js + render.js     the existing web UI (shared with the desktop build)
-        │  base64 ESC/POS byte stream
-        ▼
-Capacitor.Plugins.PrintTheShotPrinter   native plugin  ─┐
-BluetoothPrinterBridge (pyjnius)        static entry   ─┼─► BluetoothPrinter (one socket)
-LocalPrintBridge (127.0.0.1:9100)       HTTP bridge    ─┘
-        │  classic Bluetooth SPP
-        ▼
-thermal receipt printer (ESC/POS)
+        ┌─────────────────────────── the tablet IS the server ───────────────────────┐
+        │                                                                            │
+DE1 ──► │  :8000  MiniHttpServer (Java, hand-rolled, no dependencies)                │
+        │           ├── serves the web UI out of the APK assets                      │
+        │           ├── POST /upload      → ShotStore (app-private storage)          │
+        │           └── /api/*            → history, statistics, print queue         │
+        │                    ▲                                                       │
+        │                    │ CORS                                                 │
+        │  Capacitor WebView │  web/index.html + app.js + render.js                  │
+        │                    │  polls the print queue, renders the chart on canvas   │
+        │                    ▼                                                       │
+        │                base64 ESC/POS byte stream                                  │
+        │                    ▼                                                       │
+        │  Capacitor.Plugins.PrintTheShotPrinter ─┐                                  │
+        │  BluetoothPrinterBridge (pyjnius)       ─┼─► BluetoothPrinter (one socket)  │
+        │  LocalPrintBridge (127.0.0.1:9100)      ─┘                                 │
+        │                    │ classic Bluetooth SPP                                 │
+        │                    ▼                                                       │
+        │             thermal receipt printer (ESC/POS)                              │
+        └────────────────────────────────────────────────────────────────────────────┘
 ```
+
+The DE1 uploads to the tablet directly; nothing else is needed.
 
 The web UI builds the **complete** byte stream — reset → `GS v 0` raster bitmap →
 feed → cut — and the native layer writes it into the Bluetooth socket verbatim.
@@ -69,7 +82,7 @@ The native side never parses or appends a single byte: how the bytes are compose
 is decided in exactly one place. (The Python service builds its own complete job
 the same way via `../printers/escpos.py`.)
 
-Two entry points exist because the project has two deployment shapes:
+Three entry points exist because the project has several deployment shapes:
 
 | Caller | Entry point | When it applies |
 |---|---|---|

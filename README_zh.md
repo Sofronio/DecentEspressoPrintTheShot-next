@@ -33,11 +33,11 @@ Beta 用 Pillow 在服务端画图,然后把生成的 PNG 送去打印。Next �
 | macOS(Intel) | `PrintTheShotNext-macos-intel.zip` | 同上 |
 | Windows | `PrintTheShotNext-windows-x64.exe` | 双击 |
 | Linux | `PrintTheShotNext-linux` | `chmod +x PrintTheShotNext-linux && ./PrintTheShotNext-linux` |
-| Android | `PrintTheShotNext-android.apk` | 安装 APK,首次启动时填服务端地址 |
+| Android | `PrintTheShotNext-android.apk` | 装上即可 —— 它自己就是服务端,会显示本机地址 |
 
-桌面版是**完整的服务端**:运行之后打开 `http://localhost:8000`。
-Android 版是**客户端** —— 它自身不跑服务端,需要同一网络里有一台机器跑着服务端,
-然后通过蓝牙打印。
+**每一个构建都是完整的服务端,Android 版也是。** 运行之后打开
+`http://localhost:8000` —— Android 上应用会打开自己的界面,并且显示本机的局域网
+地址,DE1 直接往平板上传即可。没有客户端模式,也不需要另一台机器配合。
 
 ### 从源码运行
 

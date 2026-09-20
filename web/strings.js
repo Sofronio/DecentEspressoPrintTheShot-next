@@ -116,6 +116,8 @@ window.PTS_STRINGS = {
     "h_languages": "Languages:",
     "h_print": "Printing",
     "h_stats": "Statistics",
+    "lan_address_hint": "Use this as the server address in the DE1 plugin",
+    "lan_address_label": "Device address",
     "language": "Language",
     "latest_n": "Latest 9",
     "machine_id": "",
@@ -188,6 +190,7 @@ window.PTS_STRINGS = {
     "update_note": "Auto-backup to backup/ before updating; restart the server after update; packaged builds can't self-update.",
     "update_ok": "Up to date",
     "update_title": "Service Update",
+    "upload_failed": "Upload failed — check the server address and that the server is running.",
     "upload_success": "Upload successful",
     "view_large": "Click to view large image"
   },
@@ -265,6 +268,8 @@ window.PTS_STRINGS = {
     "h_languages": "语言:",
     "h_print": "打印",
     "h_stats": "统计数据",
+    "lan_address_hint": "把它填进 DE1 插件的服务端地址",
+    "lan_address_label": "本机地址",
     "language": "语言",
     "latest_n": "最新 9 条",
     "machine_id": "",
@@ -337,6 +342,7 @@ window.PTS_STRINGS = {
     "update_note": "更新前自动备份到 backup/ 目录;更新后请重启服务器;打包版不支持在线更新。",
     "update_ok": "已是最新",
     "update_title": "服务更新",
+    "upload_failed": "上传失败 —— 请检查服务端地址,以及服务端是否在运行。",
     "upload_success": "上传成功",
     "view_large": "点击查看大图"
   }
