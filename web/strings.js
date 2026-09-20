@@ -39,7 +39,7 @@
  * re-run the exporter rather than keeping two hand-maintained copies.
  */
 
-window.PTS_VERSION = "2.1-beta.1";
+window.PTS_VERSION = "2.1-beta.2";
 
 window.PTS_STRINGS = {
   "en": {
