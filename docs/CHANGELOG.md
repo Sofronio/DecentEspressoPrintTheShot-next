@@ -2,6 +2,45 @@
 
 [中文](CHANGELOG_zh.md) | English
 
+## 2.1-beta.4
+
+A small release fixing two things that came from the same place: values in Capacitor's
+generated project that nothing ever updated.
+
+### Fixed
+
+- **The release build could not be installed at all.** Capacitor's template has no
+  signing config on the release build type, so `assembleRelease` produced an unsigned
+  package and installation failed with
+  `INSTALL_PARSE_FAILED_NO_CERTIFICATES`. That error never says "you did not sign it",
+  which is a good part of why it took a while to place. The build now signs the release
+  variant with the debug key — fine for sideloading, and a release build here is only a
+  faster variant of the debug one. The key is generated if it is missing.
+- **Every APK called itself 1.0.** The generated project hard-codes `versionCode 1` and
+  `versionName "1.0"`, Capacitor's template values, so no build ever followed the app
+  version and the system reported every release as the same "1.0". Both now come from
+  `VERSION` in `print_the_shot_server.py` — the same source the UI and the release notes
+  use. Odd as it sounds, this is the kind of breakage that survives for a long time: the
+  APK still builds, still installs, and still works.
+
+### CI
+
+- The Android verification step now asserts that the APK's version matches the source.
+  It already checked the package name, the app label and the bundled assets; a version
+  that silently stops tracking the app was the one gap left.
+
+### Verification
+
+- The release APK verifies with `apksigner` (CN=Android Debug), installs, launches and
+  does not crash.
+- Both variants built from this source report `versionCode 20104` / `versionName
+  2.1-beta.4`; the scheme is `major*10000 + minor*100 + prerelease number`, with a final
+  release taking 99 within the same minor so it sorts after every prerelease.
+- `debug → release → debug` builds cleanly in sequence. The first attempt at this patch
+  was not idempotent: building release and then debug left a dangling
+  `signingConfig` reference and failed with `unknown property 'debugInjected'`, pointing
+  at `build.gradle` rather than at the script.
+
 ## 2.1-beta.3
 
 The release that made the Android app usable as a background print node. Almost

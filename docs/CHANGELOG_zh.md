@@ -2,6 +2,38 @@
 
 中文 | [English](CHANGELOG.md)
 
+## 2.1-beta.4
+
+一个小版本,修的两件事其实同源:Capacitor 生成工程里那些**从来没人更新过**的模板值。
+
+### 修复
+
+- **release 包根本装不上。** Capacitor 模板里 `buildTypes.release` 没有签名配置,
+  于是 `assembleRelease` 出来的是未签名包,安装直接失败:
+  `INSTALL_PARSE_FAILED_NO_CERTIFICATES`。而这条报错**不会**告诉你「你没签名」——
+  这也是它花了一阵子才被定位的原因之一。现在 release 变体用调试密钥签名:sideload
+  测试够用,而且这个用途下 release 包本来也只是 debug 包的一个更快的变体。密钥不
+  存在会自动生成。
+- **所有包都自称 1.0。** 生成工程里写死 `versionCode 1` / `versionName "1.0"`
+  (Capacitor 的模板值),任何一次构建都不跟 App 版本走,系统里所有版本都显示成同一个
+  「1.0」。现在两者都取自 `print_the_shot_server.py` 的 `VERSION` —— 和界面、发布
+  说明用的是同一个来源。说来奇怪,这类失效特别能活:包照样打得出来、装得上、也能用。
+
+### CI
+
+- Android 的校验步骤现在会断言 APK 的版本号与源码一致。它本来就查包名、应用名和
+  打包资源,「版本号悄悄不再跟版本走」是剩下唯一的缺口。
+
+### 验证
+
+- release 包通过 `apksigner` 校验(CN=Android Debug),安装、启动、无崩溃。
+- 用这份源码构建的两个变体都是 `versionCode 20104` / `versionName 2.1-beta.4`;
+  编码规则是 `major*10000 + minor*100 + 预发布序号`,正式版取同一 minor 下的 99,
+  好排在所有同名预发布之后。
+- `debug → release → debug` 连续构建通过。这个补丁的第一版**不幂等**:构建完
+  release 再构建 debug 会留下一个悬空的 `signingConfig` 引用,报
+  `unknown property 'debugInjected'`,而报错指向 `build.gradle` 而不是脚本。
+
 ## 2.1-beta.3
 
 让 Android 版真正能当后台打印节点用的一版。下面几乎所有改动都源于同一个事实:
