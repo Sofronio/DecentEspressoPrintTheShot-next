@@ -45,5 +45,16 @@ android/android/
 android/app/build/
 android/build/
 
+# 本地提醒文档(不入库)
+#
+# 操作性笔记:发版规则、换编号时要删哪些旧 tag、怎么造一个「旧版本」APK 来测更新。
+# 里面记了设备序列号和历史 SHA 这类不该公开的东西,所以留在本机。
+#
+# Local reminders, never committed. Operational notes: release rules, which old tags
+# to delete when the numbering scheme changes, and how to build an "old version" APK
+# to exercise the updater. It records device serials and historical SHAs, which is why
+# it stays local.
+docs/REMINDERS.md
+
 # macOS
 .DS_Store
