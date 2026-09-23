@@ -2,6 +2,45 @@
 
 [中文](CHANGELOG_zh.md) | English
 
+## 2.1-beta.5
+
+A quick follow-up to 2.1-beta.4: **on a fresh install the app crashed on launch**, so
+2.1-beta.3 and 2.1-beta.4 are both broken for anyone installing them for the first time.
+Upgrade if you installed either.
+
+### Fixed
+
+- **Crash on launch after a fresh install.** `connectedDevice`, the foreground service
+  type introduced in 2.1-beta.3, requires not only its install-time permission but also
+  at least one **granted** Bluetooth permission (`BLUETOOTH_CONNECT` and friends). Those
+  are runtime permissions, and the service is started automatically when the app
+  launches — so on the very first run nothing was granted yet and `startForeground`
+  threw `SecurityException` every time.
+
+  What made it fatal rather than annoying was a deliberate choice in the service: the
+  `catch` around `startForeground` re-threw, on the reasoning that a foreground service
+  which fails to start should not fail silently. The exception then escaped
+  `onStartCommand` and took the whole app with it — before the user had seen a screen or
+  had any opportunity to grant the permission. A dead end with no way out.
+
+  The service now returns a failure instead of throwing, logs what is missing, stops
+  itself, and the activity retries on resume — so the flow is: launch normally, grant
+  the Bluetooth permission from the UI, and the keep-alive comes up by itself.
+
+### Why this was not caught earlier
+
+The tablet used for testing had `BLUETOOTH_CONNECT` granted long ago, and updating an
+installed app does not revoke it — so the failure never appeared locally. It surfaced
+only when installing a build signed with a different key, which reset the grants, and
+that is exactly the state every new user starts in.
+
+### Verification
+
+- On a real fresh install (`adb uninstall`, then install, `BLUETOOTH_CONNECT` not
+  granted): zero `FATAL EXCEPTION`, the server starts, and the log reads
+  `BLUETOOTH_CONNECT not granted; keep-alive deferred until it is` → then, once the
+  permission is granted, `keep-alive on` without any further action.
+
 ## 2.1-beta.4
 
 A small release fixing two things that came from the same place: values in Capacitor's
