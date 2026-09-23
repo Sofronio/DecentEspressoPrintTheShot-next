@@ -155,6 +155,23 @@ jobs:
           echo "应用名 / label : $LABEL"
           [ "$LABEL" = "PrintTheShotNext" ] || { echo "::error::应用名不对: $LABEL"; exit 1; }
 
+          # 版本号必须跟 App 版本走。Capacitor 生成工程里默认写死 versionCode 1 /
+          # versionName "1.0",是构建脚本按 print_the_shot_server.py 的 VERSION 改写的
+          # —— 那条改写一旦失效,包照样能打出来、能装上,只是系统里所有版本都叫
+          # 「1.0」,而这种「看着正常」的错最容易一直没人发现。
+          #
+          # The version must follow the app version. Capacitor's generated project
+          # hard-codes versionCode 1 / versionName "1.0" and the build script rewrites it
+          # from VERSION in print_the_shot_server.py. If that rewrite stops working the
+          # APK still builds and installs — every release just reports itself as "1.0",
+          # and that kind of looks-fine breakage tends to go unnoticed for a long time.
+          WANT=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' print_the_shot_server.py | head -1)
+          GOT=$("$AAPT" dump badging "$APK" | sed -n "s/^package:.*versionName='\([^']*\)'.*/\1/p")
+          echo "版本 / version : $GOT (源码 / source: $WANT)"
+          [ "$GOT" = "$WANT" ] || {
+            echo "::error::APK 版本号是 $GOT,源码是 $WANT"; exit 1;
+          }
+
           # Web 资源和字体必须真的打进包里 —— 少一样,用户装上就是白屏。
           # The web assets and the font must actually be inside: miss one and the app
           # shows a blank screen once installed.

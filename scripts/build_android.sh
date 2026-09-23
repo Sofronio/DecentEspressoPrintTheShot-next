@@ -158,6 +158,121 @@ cp "$OURS/res/xml/"*.xml "$GEN/res/xml/" 2>/dev/null || true
 # manifest references its AppTheme.
 [ -f "$OURS/res/values/strings.xml" ] && cp "$OURS/res/values/strings.xml" "$GEN/res/values/"
 
+# ---- 版本号与签名 ----
+#
+# 生成工程里写死的是 versionCode 1 / versionName "1.0" —— Capacitor 的模板值,
+# 从来不跟 App 版本走,于是所有 APK 在系统看来都是同一个版本,「1.0」。
+# 这里每次构建按 print_the_shot_server.py 的 VERSION 改掉。
+#
+# 签名:release 变体在 Capacitor 模板里**没有签名配置**,assembleRelease 出来的
+# 是未签名包 —— 装不上(INSTALL_PARSE_FAILED_NO_CERTIFICATES),而报错信息不会
+# 告诉你「你没签名」。用调试密钥签它:sideload 测试够用,而且这个用途下的
+# release 包本来就只是 debug 包的一个更快的变体。
+#
+# ---- version and signing ----
+#
+# The generated project hard-codes versionCode 1 / versionName "1.0" — Capacitor's
+# template values, which never follow the app version, so every APK looks like the same
+# release called "1.0". Rewritten here from print_the_shot_server.py's VERSION.
+#
+# Signing: the release variant has **no signing config** in Capacitor's template, so
+# assembleRelease produces an unsigned package that cannot be installed
+# (INSTALL_PARSE_FAILED_NO_CERTIFICATES) — and the error never says "you did not sign
+# it". The debug key signs it: fine for sideloading, and a release build here is only a
+# faster variant of the debug one anyway.
+python3 - "$REPO_ROOT" "$VARIANT" <<'PY'
+import os, re, sys
+
+root, variant = sys.argv[1], sys.argv[2]
+gradle = os.path.join(root, "android", "android", "app", "build.gradle")
+src = open(gradle, encoding="utf-8").read()
+
+# 从服务端源码取版本 —— 和界面、发布产物用的是同一个来源
+# Take the version from the server source: the same one the UI and releases use
+version = None
+for line in open(os.path.join(root, "print_the_shot_server.py"), encoding="utf-8"):
+    m = re.match(r'VERSION\s*=\s*"([^"]+)"', line.strip())
+    if m:
+        version = m.group(1)
+        break
+if not version:
+    sys.exit("❌ 读不到 VERSION / could not read VERSION")
+
+# 2.1-beta.3 → code 20103。预发布用它的序号;正式版取同一 minor 下的 99,好让它
+# 排在所有同名预发布之后(和 export_strings.py 的版本比较是同一个道理)。
+# 2.1-beta.3 → 20103. A prerelease contributes its number; a final release takes 99
+# within the same minor so it sorts after every prerelease of that minor (the same
+# reasoning as the version comparison in export_strings.py).
+m = re.match(r'(\d+)\.(\d+)(?:-[A-Za-z]+\.(\d+))?$', version)
+if not m:
+    sys.exit("❌ 版本号格式不认识 / unrecognised version: %s" % version)
+major, minor, pre = int(m.group(1)), int(m.group(2)), m.group(3)
+code = major * 10000 + minor * 100 + (int(pre) if pre else 99)
+
+src = re.sub(r'versionCode\s+\d+', 'versionCode %d' % code, src)
+src = re.sub(r'versionName\s+"[^"]*"', 'versionName "%s"' % version, src)
+
+# 先清理上次注入的东西 —— 签名块 **和** release 里那行引用,两样都要删。
+#
+# 只删块是个真实的坑(踩过):构建过 release 之后再构建 debug,块被删了而那行
+# 引用还在,gradle 评估时直接报 unknown property 'debugInjected' —— 而报错指向
+# 的是 build.gradle,不是这个脚本,于是看起来像是生成工程坏了。
+#
+# Clear out whatever a previous run injected — both the block **and** the reference
+# inside the release block. Removing only the block is a real trap (this was hit):
+# build release, then build debug, and the reference outlives the block, so Gradle
+# fails with unknown property 'debugInjected' — pointing at build.gradle rather than
+# at this script, which makes it look like the generated project broke.
+src = re.sub(r'\n\s*// >>> debug-signing \(injected by build_android.sh\).*?// <<< debug-signing\n',
+             '\n', src, flags=re.S)
+src = re.sub(r'\n\s*signingConfig signingConfigs\.debugInjected', '', src)
+
+# 签名块总是注入(debug 不引用它就完全无害),只有 release 才加引用。
+# 这样两个变体来回构建时,文件状态始终自洽 —— 上一版按变体决定要不要注入块,
+# 于是「release 之后 debug」就留下了一个悬空引用。
+#
+# The block is always injected — harmless when nothing references it — and only the
+# release variant references it. That keeps the file consistent no matter which variant
+# was built last; deciding the block by variant is what left a dangling reference.
+keystore = os.path.expanduser("~/.android/debug.keystore").replace("\\", "/")
+block = """
+    // >>> debug-signing (injected by build_android.sh)
+    // 用调试密钥签 release 包:Capacitor 模板里没有签名配置,不签就装不上
+    // (INSTALL_PARSE_FAILED_NO_CERTIFICATES),而那个报错不会告诉你「你没签名」。
+    // Signs the release build with the debug key: Capacitor's template has no signing
+    // config, and an unsigned package cannot be installed at all.
+    signingConfigs {
+        debugInjected {
+            storeFile file("%s")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
+    }
+    // <<< debug-signing
+""" % keystore
+src = src.replace("\n    buildTypes {", block + "\n    buildTypes {", 1)
+
+if variant == "release":
+    src = re.sub(r'(release\s*\{)', r'\1\n            signingConfig signingConfigs.debugInjected', src, count=1)
+
+open(gradle, "w", encoding="utf-8").write(src)
+print("   versionName %s / versionCode %d%s" % (version, code,
+      " / 签名:调试密钥" if variant == "release" else ""))
+PY
+
+# release 用的密钥不存在就生成一个(Android 工具链本来自动建,但 CI 或新机器上可能没有)
+# Create the key when absent: the Android tooling normally makes it, but CI or a fresh
+# machine may not have one
+if [ "$VARIANT" = "release" ] && [ ! -f "$HOME/.android/debug.keystore" ]; then
+  mkdir -p "$HOME/.android"
+  keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" \
+          -storepass android -alias androiddebugkey -keypass android \
+          -keyalg RSA -keysize 2048 -validity 10000 \
+          -dname "CN=Android Debug,O=Android,C=US" >/dev/null 2>&1
+  echo "   已生成调试密钥 / generated a debug keystore"
+fi
+
 # 每次构建都校验一遍 XML:注释里一个 `--` 就足以让 mergeDebugResources 失败,
 # 而报错信息指向的是生成的中间文件,不好定位。
 # Validate the XML every build: one `--` inside a comment is enough to break
