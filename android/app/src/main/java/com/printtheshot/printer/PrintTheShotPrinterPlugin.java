@@ -375,6 +375,112 @@ public class PrintTheShotPrinterPlugin extends Plugin {
     }
 
     // ------------------------------------------------------------------
+    // 插件文件导出 / exporting the plugin file
+    // ------------------------------------------------------------------
+
+    /**
+     * 把打进 APK 的 DE1 插件写到设备的「下载」目录 /
+     * write the bundled DE1 plugin into the device's Downloads folder.
+     *
+     * 为什么不走「开浏览器下载」那条路
+     * --------------------------------
+     * 那是我先试过的方案,它自相矛盾:浏览器一起来,本 App 就退到后台,而下载要从
+     * **本 App 自己的服务端**取 —— 提供文件的那一端在被取的那一刻被系统冻住,于是
+     * 浏览器打开一个空白页,什么也没存下。
+     *
+     * 而且根本没必要联网:plugin.tcl 本来就在 APK 里(assets/public/plugin/)。
+     * 直接写出去,不依赖服务端、不依赖 App 在不在前台。
+     *
+     * Why not "open a browser and download"
+     * ------------------------------------
+     * That was the first attempt, and it is self-defeating: opening the browser puts this
+     * app in the background, while the file has to come from **this app's own server** —
+     * so the side providing the file gets frozen at the moment it is asked, the browser
+     * opens a blank page, and nothing is saved.
+     *
+     * Networking is not needed anyway: plugin.tcl already ships inside the APK
+     * (assets/public/plugin/). Writing it out needs no server and no foreground app.
+     *
+     * @return `{success: boolean, path: string, message: string}`
+     */
+    @PluginMethod
+    public void savePlugin(PluginCall call) {
+        String name = call.getString("name", "plugin.tcl");
+        // 只放行这两个名字 —— 它们对应界面上的两个按钮
+        // Only these two names: they are what the two buttons ask for
+        boolean isTxt = "plugin.tcl.txt".equals(name);
+        if (!isTxt && !"plugin.tcl".equals(name)) {
+            call.reject("unknown plugin file: " + name);
+            return;
+        }
+        // TXT 版存下来的名字就是 tcl.txt(它存在的理由就是蓝牙发送时安卓端拒收 .tcl)
+        // The TXT copy saves as tcl.txt — it exists because Android refuses .tcl over Bluetooth
+        String outName = isTxt ? "tcl.txt" : "plugin.tcl";
+
+        try (java.io.InputStream in = getContext().getAssets().open("public/plugin/" + name)) {
+            java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+            byte[] chunk = new byte[8192];
+            int n;
+            while ((n = in.read(chunk)) > 0) buf.write(chunk, 0, n);
+            byte[] data = buf.toByteArray();
+
+            String path = writeToDownloads(outName, data);
+
+            JSObject ret = new JSObject();
+            ret.put("success", true);
+            ret.put("path", path);
+            ret.put("message", "已保存到「下载」/ saved to Downloads: " + outName);
+            call.resolve(ret);
+        } catch (Exception e) {
+            Log.w(TAG, "导出插件失败 / cannot export the plugin: " + e.getMessage());
+            call.reject("导出失败 / export failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 写进公共下载目录 / write into the public Downloads folder.
+     *
+     * Android 10 (API 29) 起是分区存储,必须通过 MediaStore 落盘 —— 直接写
+     * Environment.getExternalStoragePublicDirectory() 那条路在新系统上会失败。
+     * 更早的系统上没有 MediaStore.Downloads,退回直接写,并需要 WRITE_EXTERNAL_STORAGE。
+     *
+     * From Android 10 (API 29) scoped storage applies and the file has to go through
+     * MediaStore; writing to Environment.getExternalStoragePublicDirectory() directly
+     * fails on newer systems. Older ones have no MediaStore.Downloads, so they fall back
+     * to a plain write, which needs WRITE_EXTERNAL_STORAGE.
+     */
+    private String writeToDownloads(String outName, byte[] data) throws Exception {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            android.content.ContentValues values = new android.content.ContentValues();
+            values.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, outName);
+            values.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain");
+            values.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
+                    android.os.Environment.DIRECTORY_DOWNLOADS);
+
+            android.net.Uri collection = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+            android.net.Uri item = getContext().getContentResolver().insert(collection, values);
+            if (item == null) throw new java.io.IOException("MediaStore 拒绝了写入 / MediaStore refused");
+
+            try (java.io.OutputStream out = getContext().getContentResolver().openOutputStream(item)) {
+                if (out == null) throw new java.io.IOException("无法打开输出流 / cannot open the output");
+                out.write(data);
+            }
+            return android.os.Environment.DIRECTORY_DOWNLOADS + "/" + outName;
+        }
+
+        java.io.File dir = android.os.Environment
+                .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS);
+        if (!dir.exists() && !dir.mkdirs()) {
+            throw new java.io.IOException("无法创建下载目录 / cannot create the Downloads folder");
+        }
+        java.io.File out = new java.io.File(dir, outName);
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(out)) {
+            fos.write(data);
+        }
+        return out.getAbsolutePath();
+    }
+
+    // ------------------------------------------------------------------
     // 打印 / printing
     // ------------------------------------------------------------------
 

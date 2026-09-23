@@ -872,10 +872,52 @@ function initText() {
   // The plugin download also comes from the server, so the links need absolute
   // URLs too — otherwise tapping download in the APK 404s against the WebView's own
   // asset directory.
+  // 平板上这两个按钮不走链接,改由原生把 APK 里那份文件写进「下载」目录。
+  //
+  // 两条弯路都试过了:
+  //   1. 直接点链接 —— WebView 不会保存文件,点了没有任何反应;
+  //   2. 把 URL 交给系统浏览器 —— **自相矛盾**:浏览器一起来本 App 就退到后台,
+  //      而文件要从本 App 自己的服务端取,提供文件的那一端在被取的那一刻被系统
+  //      冻住,浏览器打开的是空白页(实测如此)。
+  //
+  // 文件本来就在 APK 里,根本不需要联网。桌面浏览器仍然走原来的链接(那里的
+  // `<a download>` 是正常的)。
+  //
+  // On the tablet these two buttons do not use the links: the native side writes the
+  // copy bundled in the APK into the Downloads folder.
+  //
+  // Both detours were tried already — (1) the plain link does nothing because a WebView
+  // does not save files, and (2) handing the URL to the system browser is
+  // **self-defeating**: the browser takes the foreground, this app goes to the
+  // background, and the file has to come from this app's own server, so the side
+  // providing it gets frozen exactly when it is asked, leaving a blank page (measured).
+  //
+  // The file is inside the APK; no network is involved. Desktop browsers keep using the
+  // links, where `<a download>` behaves.
+  const nativePrinter = window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.PrintTheShotPrinter;
   const p1 = document.getElementById('btn-plugin');
   const p2 = document.getElementById('btn-plugin-txt');
-  if (p1) p1.href = url('/plugin/plugin.tcl');
-  if (p2) p2.href = url('/plugin/plugin.tcl.txt');
+
+  if (nativePrinter && nativePrinter.savePlugin) {
+    [['btn-plugin', 'plugin.tcl'], ['btn-plugin-txt', 'plugin.tcl.txt']].forEach(([id, name]) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.removeAttribute('download');
+      el.setAttribute('href', '#');
+      el.addEventListener('click', async (ev) => {
+        ev.preventDefault();
+        try {
+          const r = await nativePrinter.savePlugin({ name: name });
+          toast('✅ ' + ((r && r.message) || name));
+        } catch (e) {
+          toast('❌ ' + ((e && e.message) || e));
+        }
+      });
+    });
+  } else {
+    if (p1) p1.href = url('/plugin/plugin.tcl');
+    if (p2) p2.href = url('/plugin/plugin.tcl.txt');
+  }
   document.getElementById('plugin-note').textContent = T('plugin_note');
   document.getElementById('h-update').textContent = '🔄 ' + T('update_title');
   document.getElementById('h-ai-settings').textContent = '🤖 ' + T('h_ai_settings');
