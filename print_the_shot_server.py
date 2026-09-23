@@ -290,15 +290,22 @@ LANGUAGES = {
         "plugin_download": "Download DE1 Plugin",
         "plugin_instructions": "Plugin Installation",
         # 序号由页面上的 <ol> 自动排,文案里不要再写「1.」/ The <ol> numbers these.
-        "plugin_step1": "Download plugin.tcl and copy it to the DE1 tablet:",
-        "plugin_step2": "/de1plus/plugins/print_the_shot/plugin.tcl",
+        "plugin_step1": "Download plugin.tcl and copy it to the DE1 tablet: /de1plus/plugins/print_the_shot/plugin.tcl",
+        "plugin_step2": "If there is no print_the_shot folder, create one inside the plugins folder",
         "plugin_step3": "Restart DE1App — the plugin loads automatically",
         # 插件的地址和路径是两个字段,但写在同一行 —— 它们是连着做的两件事,拆成
-        # 两条只是把列表拉长。中间加个逗号断开,免得被读成一个值。
+        # 两条只是把列表拉长。中间用空格隔开,免得被读成一个值。
+        #
+        # 空格用的是 U+00A0(不换行空格)而不是普通空格:HTML 会把连续空格压成
+        # 一个,写三个普通空格在这里显示出来只有一个。  不会被压缩。
+        #
         # The plugin has two fields here, but they go on one line: they are two things
-        # done in one go, and splitting them only lengthens the list. The comma keeps
-        # them from reading as a single value.
-        "plugin_step4": "Server address: {HOST}, path: upload",
+        # done in one go, and splitting them only lengthens the list. A gap separates
+        # them so they do not read as a single value.
+        #
+        # The gap is U+00A0, not ordinary spaces: HTML collapses runs of spaces into
+        # one, so three of them would render as a single space.   is not collapsed.
+        "plugin_step4": "Server address {HOST}   Path: upload",
         "plugin_step4_fallback": "this machine's IP:8000",
         "language": "Language",
         "queue_status": "Queue Status: {count} jobs",
@@ -455,15 +462,22 @@ LANGUAGES = {
         "plugin_download": "下载DE1插件",
         "plugin_instructions": "插件安装",
         # 序号由页面上的 <ol> 自动排,文案里不要再写「1.」/ The <ol> numbers these.
-        "plugin_step1": "下载 plugin.tcl 并复制到 DE1 平板:",
-        "plugin_step2": "/de1plus/plugins/print_the_shot/plugin.tcl",
+        "plugin_step1": "下载 plugin.tcl 并复制到 DE1 平板: /de1plus/plugins/print_the_shot/plugin.tcl",
+        "plugin_step2": "如果没有 print_the_shot 文件夹,请在 plugins 文件夹内新建 print_the_shot 文件夹",
         "plugin_step3": "重启 DE1App,插件自动加载",
         # 插件的地址和路径是两个字段,但写在同一行 —— 它们是连着做的两件事,拆成
-        # 两条只是把列表拉长。中间加个逗号断开,免得被读成一个值。
+        # 两条只是把列表拉长。中间留一段间隔,免得被读成一个值。
+        #
+        # 间隔用的是 U+00A0(不换行空格)而不是普通空格:HTML 会把连续空格压成
+        # 一个,写三个普通空格在这里显示出来只有一个。不换行空格不会被压缩。
+        #
         # The plugin has two fields here, but they go on one line: they are two things
-        # done in one go, and splitting them only lengthens the list. The comma keeps
-        # them from reading as a single value.
-        "plugin_step4": "服务器地址填 {HOST},path 路径填写 upload",
+        # done in one go, and splitting them only lengthens the list. A gap separates
+        # them so they do not read as a single value.
+        #
+        # The gap is U+00A0, not ordinary spaces: HTML collapses runs of spaces into
+        # one, so three of them would render as a single space. U+00A0 is not collapsed.
+        "plugin_step4": "服务器地址填 {HOST}   路径Path填写 upload",
         "plugin_step4_fallback": "本机IP:8000",
         "language": "语言",
         "queue_status": "打印队列: {count} 个任务",
