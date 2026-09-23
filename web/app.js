@@ -891,6 +891,7 @@ function initText() {
   document.getElementById('step1').textContent = T('plugin_step1');
   document.getElementById('step2').textContent = T('plugin_step2');
   document.getElementById('step3').textContent = T('plugin_step3');
+  document.getElementById('step5').textContent = T('plugin_step5');
   renderPluginStep4();
 }
 
@@ -902,8 +903,8 @@ function initText() {
  * 的话,永远会落到兜底分支,页面看着正常、地址那一条却永远是占位文字。
  * 所以 loadStatus 拿到结果之后要再调一次。
  *
- * 顺带一提,地址后面跟的是 /upload 而不是裸的 8000 端口:插件要填的是完整的
- * 上传端点。
+ * 这里给的是 **host:port,不带 http://** —— 插件的 Server URL 那一栏要的就是
+ * 这个,带上协议它反而连不上。路径在下一步单独填(那是插件里另一个字段)。
  *
  * A function of its own because this step is **state-dependent**: the string is static
  * but the address comes from /api/status, which is async and usually arrives after the
@@ -911,16 +912,19 @@ function initText() {
  * take the fallback branch — the page looks fine and the address line stays a
  * placeholder forever. loadStatus therefore calls this again once the response lands.
  *
- * The address carries /upload rather than a bare port 8000, because what goes into the
- * plugin is the full upload endpoint.
+ * It shows **host:port with no http://**, which is what the plugin's Server URL field
+ * wants; a scheme there stops it connecting. The path is its own field, so it is its
+ * own step.
  */
 function renderPluginStep4() {
   const el = document.getElementById('step4');
   if (!el) return;
   const lanUrl = (lastStatus && lastStatus.lan_url) || '';
-  el.textContent = lanUrl
-    ? T('plugin_step4').replace('{URL}', lanUrl + '/upload')
-    : T('plugin_step4').replace('{URL}', T('plugin_step4_fallback'));
+  // http://192.168.1.225:8000 → 192.168.1.225:8000
+  const host = lanUrl.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  el.textContent = host
+    ? T('plugin_step4').replace('{HOST}', host)
+    : T('plugin_step4').replace('{HOST}', T('plugin_step4_fallback'));
   const hPrint = document.getElementById('h-print');
   if (hPrint) hPrint.textContent = T('h_print');
 }
