@@ -19,8 +19,17 @@
 来源**:改文案只改 print_the_shot_server.py,然后跑这个脚本重新导出,不要两边
 各改一份。两边各维护一份的结局一定是走偏,而走偏的表现是「界面上冒出一堆 key」。
 
+**版本号走的是同一条路。** `window.PTS_VERSION` 也是从这里导出的,源头是服务端
+源码里的 `VERSION`。所以发版时改 `print_the_shot_server.py` 的 `VERSION`,再跑
+本脚本 —— **不要直接改 web/strings.js 里的版本号**。手改也能得到一样的结果(只要
+别处没错),但那会让这个文件一半是生成的、一半是手写的;下次重新生成时手写的那部分
+被无声冲掉,而「生成物被人改过」这件事本身就很难被发现。
+
+发版的完整顺序见 scripts/build_release_notes.py 的文档。
+
 跑法 / usage:
     python3 scripts/export_strings.py
+    python3 scripts/export_strings.py --check   # 只检查是否与源码一致,不写文件
 
 English
 -------
@@ -38,6 +47,16 @@ So the front end has to ship a fallback table. It is generated from the server's
 table, which keeps **one source of truth**: edit print_the_shot_server.py, run this,
 done. Maintaining two hand-written copies guarantees they drift, and drifting shows
 up as raw keys leaking into the UI.
+
+**The version number takes the same route.** `window.PTS_VERSION` is exported from
+here too, sourced from `VERSION` in the server. So a release changes `VERSION` in
+print_the_shot_server.py and runs this script — **never edit the version directly in
+web/strings.js**. Hand-editing reaches the same result (if nothing else is off), but
+it leaves the file half generated and half hand-written; the next regeneration
+silently discards the hand-written half, and "someone edited a generated file" is
+very hard to notice after the fact.
+
+The full release sequence is documented in scripts/build_release_notes.py.
 """
 
 import json
@@ -136,32 +155,60 @@ def read_version():
     raise SystemExit("❌ 找不到 VERSION / could not find VERSION")
 
 
-def main():
-    languages = load_languages()
+def build(languages, version):
+    """拼出 strings.js 的完整内容 / compose the whole of strings.js."""
     # 只导出真正的文案,__code / __languages 这些是运行时附加的
     # Export the strings only; __code / __languages are runtime additions
     clean = lambda d: {k: v for k, v in d.items() if not k.startswith("__")}  # noqa: E731
+    payload = {"en": clean(languages["en"]), "zh": clean(languages["zh"])}
 
+    out = [HEADER]
+    # 版本号也要一起导出。index.html 里写的是 <title>...v{{VERSION}}</title>,
+    # 由服务端替换 —— 而打包进 APK 时没人替换,标题里就会留着字面的
+    # "{{VERSION}}"。带上版本号,前端就能自己把它补上。
+    #
+    # The version goes out too. index.html has <title>...v{{VERSION}}</title> and
+    # the server substitutes it — but nothing does when the files are bundled into
+    # the APK, leaving a literal "{{VERSION}}" in the title. Shipping the version
+    # lets the front end fill it in itself.
+    out.append("window.PTS_VERSION = %s;\n\n" % json.dumps(version, ensure_ascii=False))
+    out.append("window.PTS_STRINGS = ")
+    out.append(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    out.append(";\n")
+    return "".join(out), payload
+
+
+def main():
+    check = "--check" in sys.argv[1:]
+
+    languages = load_languages()
     missing = [c for c in ("en", "zh") if c not in languages]
     if missing:
         raise SystemExit("❌ 缺少语言 / missing languages: %s" % ", ".join(missing))
 
-    payload = {"en": clean(languages["en"]), "zh": clean(languages["zh"])}
-    version = read_version()
+    text, payload = build(languages, read_version())
+
+    # --check 让「生成的产物是否还跟源码一致」变成一条可断言的事实,于是测试脚本
+    # 能挡住「改了 VERSION 却忘了重新导出」。手改 strings.js 会在这里露馅。
+    #
+    # --check turns "is the generated file still consistent with the source" into an
+    # assertable fact, so the test script can catch "bumped VERSION but forgot to
+    # re-export". Hand-editing strings.js shows up here.
+    if check:
+        with open(OUT, encoding="utf-8") as f:
+            current = f.read()
+        if current == text:
+            print("✅ %s 与源码一致 / up to date" % os.path.relpath(OUT, ROOT))
+        else:
+            raise SystemExit(
+                "❌ %s 与 print_the_shot_server.py 对不上 —— 跑一次不带 --check 的重新导出"
+                " / %s does not match print_the_shot_server.py — re-run without --check"
+                % (os.path.relpath(OUT, ROOT), os.path.relpath(OUT, ROOT))
+            )
+        return
+
     with open(OUT, "w", encoding="utf-8") as f:
-        f.write(HEADER)
-        # 版本号也要一起导出。index.html 里写的是 <title>...v{{VERSION}}</title>,
-        # 由服务端替换 —— 而打包进 APK 时没人替换,标题里就会留着字面的
-        # "{{VERSION}}"。带上版本号,前端就能自己把它补上。
-        #
-        # The version goes out too. index.html has <title>...v{{VERSION}}</title> and
-        # the server substitutes it — but nothing does when the files are bundled into
-        # the APK, leaving a literal "{{VERSION}}" in the title. Shipping the version
-        # lets the front end fill it in itself.
-        f.write("window.PTS_VERSION = %s;\n\n" % json.dumps(version, ensure_ascii=False))
-        f.write("window.PTS_STRINGS = ")
-        json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
-        f.write(";\n")
+        f.write(text)
 
     print("已写入 / written: %s" % os.path.relpath(OUT, ROOT))
     for code, table in payload.items():

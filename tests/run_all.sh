@@ -6,7 +6,8 @@
 # ----
 # 依次跑五组测试,任何一组失败就以非零码退出:
 #
-#   0. 前端 JS 语法检查(几毫秒,挡住「一个括号写错 = 整个界面白屏」)
+#   0. 前端 JS 语法检查 + 生成物一致性(几毫秒,挡住「一个括号写错 = 整个界面白屏」,
+#      以及「改了源码却忘了重新导出 web/strings.js」)
 #   1. tests/test_printers.py           打印层字节布局(纯逻辑)
 #   2. tests/test_platform_dispatch.py  平台探测与 Windows 载荷构造
 #   3. tests/test_server.py             服务端 HTTP 接口(起真进程)
@@ -22,7 +23,9 @@
 # -------
 # Runs five suites in turn and exits non-zero if any of them fails:
 #
-#   0. front-end JS syntax (milliseconds; blocks "one bad paren = blank screen")
+#   0. front-end JS syntax + generated-file consistency (milliseconds; blocks
+#      "one bad paren = blank screen" and "edited the source but forgot to
+#      re-export web/strings.js")
 #   1. tests/test_printers.py           printing-layer byte layout (pure logic)
 #   2. tests/test_platform_dispatch.py  platform detection + Windows payload
 #   3. tests/test_server.py             server HTTP API (spawns a real process)
@@ -49,7 +52,7 @@ hr() { printf '%s\n' "───────────────────�
 # the browser only drops a SyntaxError into a console nobody reads. The user sees a
 # blank page and has to reason backwards from "why is it white".
 hr
-echo "0/5  前端 JS 语法 / front-end syntax"
+echo "0/5  前端脚本:语法 + 生成物一致性 / front-end: syntax + generated files"
 hr
 SYNTAX_FAILED=0
 for f in web/*.js; do
@@ -63,6 +66,19 @@ for f in web/*.js; do
 done
 if [ "$SYNTAX_FAILED" -ne 0 ]; then
   echo "❌ 前端脚本有语法错误,后面的浏览器测试不用跑了 / syntax errors; skipping browser tests"
+  exit 1
+fi
+
+# 生成的文案表必须与源码一致。改了 VERSION 或改了文案却忘了重新导出,在这里挡住;
+# 「生成的产物被人手改过」也在这里露馅 —— 这正是它要防的事,因为手改当下看不出
+# 区别,直到下次重新导出把改动无声冲掉。
+#
+# The generated string table must match the source. Bumping VERSION, or editing a
+# string, without re-exporting is caught here — as is a generated file that was
+# hand-edited. That is the whole point: a hand-edit looks fine until the next
+# regeneration silently discards it.
+if ! python3 scripts/export_strings.py --check; then
+  echo "   ➜ 重新导出 / re-run: python3 scripts/export_strings.py"
   exit 1
 fi
 

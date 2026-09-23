@@ -190,33 +190,15 @@ jobs:
           path: artifacts
 
       - name: Check release notes are current
-        run: |
-          set -e
-          NOTES=docs/RELEASE_NOTES.md
-          VERSION="${GITHUB_REF_NAME#v}"
-
-          # 两道检查,因为「空正文」和「正文没更新」是两种不同的失误:
-          # v2.1-beta.2 就是空着发出去的 —— 一个没有任何说明的 Release,而没人发现。
-          #
-          # Two checks, because "empty body" and "body not updated" are different
-          # mistakes. v2.1-beta.2 went out with an empty body — a release with no
-          # description at all — and nothing caught it.
-          if [ ! -s "$NOTES" ]; then
-            echo "::error::$NOTES 不存在或为空 / does not exist or is empty"
-            exit 1
-          fi
-
-          # 只检查「非空」不够:忘了更新的话,会把上一个版本的说明原样发出去。
-          # 因此要求正文必须提到本次的版本号。
-          #
-          # Non-empty is not enough: forgetting to update would republish the previous
-          # release's notes verbatim. So require it to mention this release's version.
-          if ! grep -qF "$VERSION" "$NOTES"; then
-            echo "::error::$NOTES 没有提到 $VERSION —— 发布前请更新 / does not mention $VERSION — update it before tagging"
-            exit 1
-          fi
-
-          echo "✅ 发布说明已就绪 / release notes ready: $VERSION"
+        # 规则收在脚本里,不在这里重写一遍:本地跑 --check 和这里跑的是同一段判断。
+        # 它挡三件事 —— 没有这一节的 CHANGELOG、空正文、以及忘了重新生成的旧正文。
+        # v2.1-beta.2 当初就是发了个空正文,而没有任何环节发现。
+        #
+        # The rules live in the script rather than being restated here, so the local
+        # --check and this step run identical logic. It blocks three things: a changelog
+        # with no section for this version, an empty body, and a stale body that was
+        # never regenerated. v2.1-beta.2 shipped an empty one and nothing caught it.
+        run: python3 scripts/build_release_notes.py "${GITHUB_REF_NAME#v}" --check
 
       - name: Prepare release files
         run: |
