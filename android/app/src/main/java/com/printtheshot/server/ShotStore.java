@@ -232,7 +232,9 @@ public class ShotStore {
             index.add(meta);
             sortIndex();
             persistIndex();
-            if (!pendingContains(filename)) queuePrintLocked(filename);
+            // 机器名一起带上:它只在这个索引里,打印那一端拿不到别的来源
+            // Carry the machine name; the index is the only place it exists
+            if (!pendingContains(filename)) queuePrintLocked(filename, machineId);
             return meta;
         }
     }
@@ -425,7 +427,18 @@ public class ShotStore {
         printedAt.entrySet().removeIf(e -> (now - e.getValue()) > DEDUPE_WINDOW_MS);
     }
 
-    private void queuePrintLocked(String filename) {
+    /**
+     * 入队 / queue one job.
+     *
+     * machineId 跟着任务走:它不在 shot 文件里(那份是上传的原始 JSON),只在索引
+     * 里,所以打印的那一端只能从这里拿到。少了它,票上印的是 UNKNOWN,而界面上
+     * 显示的却是 de1xl。
+     *
+     * The machine id rides along on the job: it is not in the shot file (that is the
+     * uploaded JSON verbatim) and lives only in the index, so the printing end can only
+     * get it from here. Without it the receipt says UNKNOWN while the UI says de1xl.
+     */
+    private void queuePrintLocked(String filename, String machineId) {
         try {
             // 哈希在入队时算一次,存进任务里。之后判断「这份打过没有」就只是查表 ——
             // 否则每次轮询队列都要把 50 个文件重新读一遍再算一遍 SHA-256。
@@ -449,6 +462,7 @@ public class ShotStore {
             JSONObject job = new JSONObject();
             job.put("filename", filename);
             job.put("hash", hash == null ? "" : hash);
+            job.put("machine_id", machineId == null ? "" : machineId);
             job.put("queued", new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date()));
             job.put("attempts", 0);
             pending.add(job);
@@ -459,8 +473,26 @@ public class ShotStore {
     /** 手动把一条 shot 加进待打印队列 / queue a shot for printing by hand. */
     public void queuePrint(String filename) {
         synchronized (lock) {
-            if (!pendingContains(filename)) queuePrintLocked(filename);
+            if (!pendingContains(filename)) queuePrintLocked(filename, machineIdOf(filename));
         }
+    }
+
+    /**
+     * 从索引里查这条 shot 的机器名 / look the machine name up in the index.
+     *
+     * 手动打印那条路手里只有一个文件名(自动那条是存盘时顺手带上的),所以要回索引
+     * 里查一次。查不到就返回空串,票上会显示 UNKNOWN —— 与「本来就没有机器名」是
+     * 同一种表现,可以接受。
+     *
+     * The manual path only has a filename (the automatic one carries the id along from
+     * save time), so it looks it up. An empty string when there is nothing to find; the
+     * receipt then says UNKNOWN, which is the same as "there was never a machine name".
+     */
+    private String machineIdOf(String filename) {
+        for (JSONObject m : index) {
+            if (filename.equals(m.optString("filename"))) return m.optString("machine_id", "");
+        }
+        return "";
     }
 
     public JSONArray pendingJobs() {

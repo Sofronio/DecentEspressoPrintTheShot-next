@@ -449,7 +449,7 @@ async function loadShots() {
                 title="${T('view_large')}" onclick="viewImage('${s.filename}')"></canvas>
         <div class="meta"><b>${(s.bean ? s.bean + ' - ' : '') + (s.profile || '?')}</b>${s.machine_id} · ${s.timestamp} · ${(s.data_size/1024).toFixed(1)}KB</div>
         <div class="actions">
-          <button class="btn" onclick="printShot('${s.filename}')" title="${T('print')}">🖨️</button>
+          <button class="btn" onclick="printShot('${s.filename}', '${s.machine_id || ''}')" title="${T('print')}">🖨️</button>
           <a class="btn gray" href="${url('/download/json/' + s.filename)}" download title="JSON">📄</a>
           <button class="btn gray" onclick="downloadShotPng('${s.filename}')" title="PNG">🖼️</button>
           <button class="btn gray" onclick="translateShot('${s.filename}')" title="${T('btn_translate')}">🌐</button>
@@ -603,12 +603,20 @@ async function drawThumb(canvas) {
 /**
  * 打印一条 shot。渲染 → 位图 → 走平台打印路径(HTTP 或 Android 原生蓝牙)。
  * Print a shot: render → bitmap → the platform's print path.
+ *
+ * machineId 由调用方从卡片上带进来(列表里本来就在显示它)。不带的话票上印
+ * UNKNOWN,而屏幕上那一行写着 de1xl —— 同一份数据两处不一致。
+ * machineId comes in from the card that called this, the same one already showing it.
+ * Without it the receipt says UNKNOWN while that line on screen says de1xl.
  */
-async function printShot(filename) {
+async function printShot(filename, machineId) {
   const btn = event && event.target;
   if (btn) btn.disabled = true;
   try {
-    const r = await PrintTheShotPrinter.printShot(filename, { lang: currentLang });
+    const r = await PrintTheShotPrinter.printShot(filename, {
+      lang: currentLang,
+      machineId: machineId || ''
+    });
     toast(r.success ? (T('print_job_sent') + ' · ' + r.via) : ('❌ ' + r.message));
   } finally {
     if (btn) btn.disabled = false;

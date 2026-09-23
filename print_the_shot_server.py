@@ -916,9 +916,19 @@ def _prune_printed(now=None):
     for h in [h for h, t in printed_at.items() if now - t > DEDUPE_WINDOW_S]:
         del printed_at[h]
 
-def queue_print_job(filename):
+def queue_print_job(filename, machine_id=""):
     """
     把一条 shot 挂进待打印队列 / add a shot to the pending-print queue.
+
+    machine_id 跟着任务走 / machine_id rides along on the job.
+
+    它不在 shot 文件里 —— 那份是上传上来的原始 JSON。机器名是服务端在存盘时记进
+    索引的,所以要打印的那一端只能从这里拿到。不带的话,票上永远是 UNKNOWN,而
+    界面上显示的却是 de1xl。
+
+    It is not in the shot file — that is the uploaded JSON verbatim. The machine name is
+    recorded by the server, in the index, at save time, so the end that prints can only
+    get it from here. Without it the receipt says UNKNOWN while the UI says de1xl.
 
     返回是否真的入了队 / returns whether it actually joined the queue.
     被去重吃掉时返回 False —— 调用方靠它决定要不要打日志,否则每次重复上传都会
@@ -951,6 +961,7 @@ def queue_print_job(filename):
         pending_prints.append({
             "filename": filename,
             "hash": h or "",
+            "machine_id": machine_id or "",
             "queued": datetime.now().strftime("%H:%M:%S"),
             "attempts": 0,
         })
@@ -2085,7 +2096,9 @@ class PrintTheShotHandler(http.server.SimpleHTTPRequestHandler):
             # whichever end owns the printer too: this only queues the job. The
             # front end (browser or Android WebView) picks it up, renders and
             # prints, then comes back to acknowledge.
-            if queue_print_job(filename):
+            # 把机器名一起带上 —— 它只在这个索引里,打印那一端拿不到别的来源
+            # Carry the machine name; the index is the only place it exists
+            if queue_print_job(filename, shot_info.get("machine_id", "")):
                 print("🖨️ 已加入待打印队列 / queued for printing: %s" % filename)
 
 # ---------------------------------------------------------------------------

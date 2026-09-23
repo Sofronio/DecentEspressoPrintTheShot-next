@@ -254,7 +254,17 @@
     var canvas = getOffscreen();
     var res = R.renderShotToCanvas(shot, canvas, {
       lang: lang,
-      machineId: options.machineId || '',
+      // 机器名:调用方给了就用,否则看 shot 自己带没带。**shot 文件里通常没有** ——
+      // 那个值存在服务端的索引里,不在上传的 JSON 里,所以自动打印那条路必须由
+      // 队列任务带过来(见 pumpQueue)。少这一句,打出来的就是 UNKNOWN,而屏幕上
+      // 显示的却是 de1xl —— 同一份数据两处不一致,最难查。
+      //
+      // Machine name: use what the caller passed, else whatever the shot carries.
+      // The shot file usually has **nothing** — the value lives in the server's index,
+      // not in the uploaded JSON — so the auto-print path has to carry it on the queue
+      // job (see pumpQueue). Without it the receipt says UNKNOWN while the screen says
+      // de1xl: the same data disagreeing with itself, which is the worst kind to trace.
+      machineId: options.machineId || shot.machine_id || '',
       strings: options.strings || null,
       scale: 1
     });
@@ -514,7 +524,13 @@
           return;
         }
 
-        var result = await printShot(job.filename, {});
+        // 机器名跟着任务走。它不在 shot 文件里(那是上传的原样 JSON),只在服务端
+        // 索引里 —— 所以队列任务要把它带上,否则自动打印出来的票永远是 UNKNOWN。
+        //
+        // The machine name travels with the job. It is not in the shot file (that is the
+        // uploaded JSON verbatim) and lives only in the server's index, so the queue job
+        // has to carry it — otherwise every auto-printed receipt says UNKNOWN.
+        var result = await printShot(job.filename, { machineId: job.machine_id || '' });
         done++;
 
         // 打印成功就先记上,**再**去 ack。顺序很重要:ack 失败时这一笔仍然留着,
