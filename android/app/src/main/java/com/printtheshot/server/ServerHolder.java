@@ -40,7 +40,39 @@ public final class ServerHolder {
     private static MiniHttpServer server;
     private static ShotStore store;
 
+    /**
+     * WebView 的唤醒入口,由 MainActivity 在界面就绪后注册 / the WebView wake hook,
+     * registered by MainActivity once the UI exists.
+     *
+     * 服务比界面先起来是正常的(服务在 onCreate 里启动,WebView 要晚一点才可用),
+     * 所以这里允许为空 —— 为空时上传照常入队,只是没人被叫醒,等前台定时器来取。
+     *
+     * The server legitimately starts before the UI does — it is started in onCreate
+     * while the WebView becomes usable a little later — so this may be null. When it
+     * is, an upload still queues normally; nobody is poked and the foreground timer
+     * picks it up instead.
+     *
+     * volatile:写发生在主线程,读发生在 HTTP 线程 / written on the main thread and
+     * read on an HTTP thread.
+     */
+    private static volatile Runnable wakeWebView;
+
     private ServerHolder() {
+    }
+
+    /**
+     * 注册 WebView 唤醒入口 / register the WebView wake hook.
+     *
+     * Activity 每次重建都会重新调一次,所以这里不做「已经注册过就跳过」的判断 ——
+     * 旧的那个 Runnable 捕获的是已经销毁的 Activity,留着它反而会往死掉的 WebView
+     * 上发消息。
+     *
+     * Called again on every Activity recreation, so there is deliberately no
+     * "already registered" guard: the previous runnable captured an Activity that no
+     * longer exists, and keeping it would post into a dead WebView.
+     */
+    public static void setWakeWebView(Runnable wake) {
+        wakeWebView = wake;
     }
 
     public static synchronized boolean start(Context ctx) {
@@ -50,7 +82,17 @@ public final class ServerHolder {
         store = new ShotStore(app);
 
         String version = readVersion(app);
-        server = new MiniHttpServer(PORT, new AppServer(app, store, version));
+        // 传的是取值器而不是当前值:服务比界面起得早,wakeWebView 那时还是 null,
+        // 直接读一次会把 null 永久钉进 AppServer。
+        //
+        // Pass a reader rather than the current value: the server starts before the UI,
+        // so wakeWebView is still null here, and reading it once would pin that null
+        // into AppServer forever.
+        server = new MiniHttpServer(PORT, new AppServer(app, store, version,
+                () -> {
+                    Runnable w = wakeWebView;
+                    if (w != null) w.run();
+                }));
         boolean ok = server.start();
         if (!ok) {
             Log.e(TAG, "服务启动失败(端口 " + PORT + " 可能被占用)/ failed to start on port " + PORT);

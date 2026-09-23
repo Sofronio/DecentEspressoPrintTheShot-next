@@ -392,32 +392,69 @@
   // that owns the printer is the end that renders.
   var autoTimer = null;
   var autoPrintEnabled = true;
+  var pumping = false;
+
+  async function fetchQueue() {
+    var r = await fetch(apiUrl('/api/print-queue'));
+    var j = await r.json();
+    return j.jobs || [];
+  }
 
   async function pumpQueue() {
     if (!autoPrintEnabled) return;
-    var jobs;
-    try {
-      var r = await fetch(apiUrl('/api/print-queue'));
-      var j = await r.json();
-      jobs = j.jobs || [];
-    } catch (e) {
-      return;
-    }
-    if (!jobs.length) return;
 
-    for (var i = 0; i < jobs.length; i++) {
-      var job = jobs[i];
-      var result = await printShot(job.filename, {});
-      try {
-        await fetch(apiUrl('/api/print-queue/ack'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filename: job.filename, ok: !!result.success })
-        });
-      } catch (e) { /* 下一轮会重试 / retried next tick */ }
-      if (typeof global.onAutoPrint === 'function') {
-        try { global.onAutoPrint(job.filename, result); } catch (e) { }
+    // 重入保护。服务端的唤醒(收到 shot 时推一把)和 5 秒定时器可能同时进来,
+    // 两边都跑的话同一个任务会被取到两次、打印两次 —— 而重复打印正是这个函数
+    // 要防的事,所以先挡住重入。
+    //
+    // Re-entry guard. The server's wake (a poke when a shot arrives) and the 5-second
+    // timer can land at the same moment; running both would claim the same job twice
+    // and print it twice — and duplicate printing is exactly what this function
+    // exists to prevent, so re-entry is blocked first.
+    if (pumping) return;
+    pumping = true;
+    try {
+      // 每打一个任务就重新拉一次队列,而不是一次抓一批。服务端在每次成功 ack 之后
+      // 会把**同内容**的其余副本一并摘掉,只有重新拉取才能让这个效果立刻生效;
+      // 一次抓一批的话,同一 shot 的重复上传会在同一轮里被逐个打光。
+      //
+      // Re-fetch the queue for each job instead of draining a batch. After each
+      // successful ack the server also drops the remaining copies of *the same
+      // content*, and only a fresh fetch sees that; with a batch, the duplicate
+      // uploads of one shot all print in the same pass.
+      while (autoPrintEnabled) {
+        var jobs;
+        try {
+          jobs = await fetchQueue();
+        } catch (e) {
+          return;
+        }
+        if (!jobs.length) return;
+
+        var job = jobs[0];
+        var result = await printShot(job.filename, {});
+        try {
+          await fetch(apiUrl('/api/print-queue/ack'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename: job.filename, ok: !!result.success })
+          });
+        } catch (e) { /* 下一轮会重试 / retried next tick */ }
+        if (typeof global.onAutoPrint === 'function') {
+          try { global.onAutoPrint(job.filename, result); } catch (e) { }
+        }
+
+        // 失败的任务仍在队列最前面(服务端保留它并累加 attempts,3 次后丢弃)。
+        // 这里必须退出去等下一轮,否则这个 while 会立刻又抓到同一个任务,把 3 次
+        // 机会在一瞬间烧光,甚至重复出票。
+        //
+        // A failed job stays at the head of the queue — the server keeps it and counts
+        // attempts, dropping it after 3. Bail out and wait for the next tick, or this
+        // loop would immediately claim it again and burn all 3 attempts at once.
+        if (!result.success) return;
       }
+    } finally {
+      pumping = false;
     }
   }
 

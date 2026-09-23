@@ -1,6 +1,8 @@
 package com.printtheshot.server;
 
 import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 
 import com.printtheshot.printer.BluetoothPrinter;
@@ -58,15 +60,56 @@ public class AppServer implements MiniHttpServer.Handler {
     private final ShotStore store;
     private final String version;
 
+    /**
+     * 有新 shot 入队时叫醒 WebView 去渲染 / poke the WebView when a shot is queued.
+     *
+     * 为什么需要它:前端那条 `setInterval(pumpQueue, 5000)` 在 App 退到后台后会被
+     * Chromium 节流(隐藏页面),长时间后台约一分钟才轮到一次,甚至有的一觉不醒。
+     * 而服务端**始终知道自己刚收到了东西** —— 于是由它主动推一把,不依赖定时器。
+     *
+     * 注意 Capacitor 本身不是元凶:它的 keepRunning 默认为 true,不会调
+     * pauseTimers()。冻结来自浏览器的隐藏页面节流。
+     *
+     * Why: the front end's `setInterval(pumpQueue, 5000)` is throttled once the app
+     * goes to the background — Chromium throttles timers on hidden pages, down to
+     * roughly once a minute, and sometimes not at all. The server, however, *always*
+     * knows the moment something arrives, so it does the poking instead of relying
+     * on a timer.
+     *
+     * Capacitor is not the culprit: its keepRunning preference defaults to true, so
+     * it never calls pauseTimers(). The freezing comes from hidden-page throttling.
+     */
+    private final Runnable wake;
+
+    private final Handler main = new Handler(Looper.getMainLooper());
+
     /** 进程启动时刻,对应桌面端的 start_time / process start time. */
     private static final String _startedAt =
             new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
                     .format(new java.util.Date());
 
-    public AppServer(Context ctx, ShotStore store, String version) {
+    public AppServer(Context ctx, ShotStore store, String version, Runnable wake) {
         this.ctx = ctx;
         this.store = store;
         this.version = version;
+        this.wake = wake;
+    }
+
+    /**
+     * 叫醒前端去取队列 / tell the front end to drain the queue.
+     *
+     * WebView 只能在主线程上碰,而上传是在 HTTP 线程上处理的,所以这里必须切回去。
+     * 没有注册唤醒方(比如服务先于界面起来)就什么都不做 —— 那种情况下前台的
+     * 定时器仍然会把队列取走。
+     *
+     * A WebView may only be touched from the main thread, and uploads are handled on
+     * an HTTP thread, so this has to hop back. With no wake runnable registered — the
+     * server can start before the UI exists — it does nothing; the foreground timer
+     * still drains the queue in that case.
+     */
+    private void wakeFrontEnd() {
+        if (wake == null) return;
+        main.post(wake);
     }
 
     @Override
@@ -178,11 +221,20 @@ public class AppServer implements MiniHttpServer.Handler {
 
         try {
             JSONObject meta = store.save(payload, machineId);
+
+            // save() 里已经把这条挂进了待打印队列,所以现在就叫醒前端 —— 这正是
+            // 「App 在后台也能打印」的那一下。前台时它只是让打印快了几秒。
+            //
+            // save() has already queued this one, so poke the front end now. This is
+            // precisely what makes printing work while the app is in the background;
+            // in the foreground it merely makes printing a few seconds quicker.
+            wakeFrontEnd();
+
             JSONObject out = new JSONObject();
             out.put("status", "success");
             out.put("id", meta.optString("timestamp"));
             out.put("message", "Shot data received and saved as " + meta.optString("filename"));
-            out.put("auto_printed", false);   // 由前端轮询队列后打印 / the front end polls and prints
+            out.put("auto_printed", false);   // 由前端取走队列后打印 / the front end drains the queue and prints
             out.put("filename", meta.optString("filename"));
             return MiniHttpServer.Response.json(200, out.toString());
         } catch (Exception e) {
