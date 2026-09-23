@@ -188,7 +188,16 @@ public class PrinterService extends Service {
             return START_NOT_STICKY;
         }
 
-        startForegroundCompat();
+        // 进不了前台就别赖着:没进前台的服务很快会被系统回收,而 START_STICKY 会让它
+        // 被反复重启、反复失败。界面上的开关(以及下次 onResume)可以再试。
+        //
+        // If it cannot go foreground, do not linger: the system reaps a service that never
+        // went foreground, and START_STICKY would restart it into the same failure. The UI
+        // switch, and the next onResume, can try again.
+        if (!startForegroundCompat()) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
 
         boolean withBridge = intent == null || intent.getBooleanExtra(EXTRA_HTTP_BRIDGE, true);
         if (withBridge) {
@@ -277,15 +286,49 @@ public class PrinterService extends Service {
     }
 
     /**
-     * 进前台 / enter the foreground state.
+     * 进前台,失败时返回 false 而不是抛出去 / enter the foreground state, or return false.
      *
      * Android 10 (API 29) 起可以显式带上服务类型;Android 14 (API 34) 起类型
      * 必须与 manifest 里声明的一致(connectedDevice),否则直接抛异常。
      * From Android 10 (API 29) the service type can be passed explicitly, and
      * from Android 14 (API 34) it must match the manifest declaration
      * (connectedDevice) or the call throws.
+     *
+     * 为什么是「返回 false」而不是「让它抛出去」
+     * ----------------------------------------
+     * connectedDevice 这个类型除了安装时权限,还要求**至少一个已授予的**蓝牙权限
+     * (BLUETOOTH_CONNECT 等)。那些是**运行时权限**,而常驻服务是在 App 启动时
+     * 自动拉起的 —— 全新安装后第一次启动,什么都还没授权,这里必然抛
+     * SecurityException。
+     *
+     * 原来这段代码刻意让它抛出去(注释写的是「免得静默失败」)。后果是:服务起不来
+     * → onStartCommand 抛 → **整个 App 闪退**,而用户连界面都没看到,更没机会去
+     * 授权 —— 一个自助不了的死循环。发布出去的包在新装设备上就是这样。
+     *
+     * 现在的做法:记一条清楚的日志、返回 false,由调用方决定怎么办(见
+     * onStartCommand)。启动流程照常跑完,用户在界面上授了蓝牙权限之后,下一次
+     * onResume 会把它重新拉起来。
+     *
+     * Why a return value instead of letting it throw
+     * ---------------------------------------------
+     * The connectedDevice type requires, besides the install-time permission, at least
+     * one **granted** Bluetooth permission (BLUETOOTH_CONNECT and friends). Those are
+     * runtime permissions, and this service is started automatically when the app
+     * launches — so on the very first run after a fresh install nothing is granted yet
+     * and this call is guaranteed to throw SecurityException.
+     *
+     * The previous version let it propagate on purpose ("rather than fail silently").
+     * The consequence was: the service cannot start, onStartCommand throws, and **the
+     * whole app crashes** — before the user has seen a screen or had any chance to grant
+     * anything. A dead end the user cannot get out of, which is what shipped.
+     *
+     * Now it logs clearly and returns false; the caller decides (see onStartCommand).
+     * Startup completes normally, and once the Bluetooth permission is granted from the
+     * UI the next onResume brings this back up.
+     *
+     * @return 是否成功进入前台 / whether it reached the foreground
      */
-    private void startForegroundCompat() {
+    private boolean startForegroundCompat() {
         Notification notification = buildNotification();
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -294,13 +337,12 @@ public class PrinterService extends Service {
             } else {
                 startForeground(NOTIFICATION_ID, notification);
             }
+            return true;
         } catch (Exception e) {
-            // 权限被削、类型没声明之类都会走到这里;打日志但要让它自己冒出去,
-            // 免得留下一个「前台服务没起来」的静默失败。
-            // Missing permission or an undeclared type lands here; log it and let
-            // it propagate rather than fail silently.
-            Log.w(TAG, "startForeground 失败 / startForeground failed: " + e.getMessage());
-            throw e;
+            Log.w(TAG, "进不了前台,后台常驻暂不可用(通常是没有已授予的蓝牙权限)/ "
+                    + "cannot go foreground, keep-alive unavailable (usually no granted "
+                    + "Bluetooth permission): " + e.getMessage());
+            return false;
         }
     }
 

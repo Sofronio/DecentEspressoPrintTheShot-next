@@ -1,8 +1,13 @@
 package com.printtheshot.app;
 
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 import android.webkit.WebView;
+
+import androidx.core.content.ContextCompat;
 
 import com.getcapacitor.Bridge;
 import com.getcapacitor.BridgeActivity;
@@ -81,6 +86,22 @@ public class MainActivity extends BridgeActivity {
     }
 
     /**
+     * 权限授予后回到界面时再试一次 / retry once the permission has been granted.
+     *
+     * 蓝牙权限是异步授予的(界面上的蓝牙设置页会申请),授予之后 App 会被暂停再恢复,
+     * 所以这里是个自然的重试点。已经开着时 startKeepAlive 什么都不做。
+     *
+     * The Bluetooth permission is granted asynchronously — the Bluetooth settings screen
+     * asks for it — and granting it pauses and resumes the activity, which makes this a
+     * natural place to retry. startKeepAlive does nothing when the service is already up.
+     */
+    @Override
+    public void onResume() {
+        super.onResume();
+        startKeepAlive();
+    }
+
+    /**
      * 拉起后台常驻 / bring up the background keep-alive.
      *
      * 失败不阻断启动:界面照常能用,只是退到后台会被冻结。界面上那个开关会显示
@@ -88,8 +109,31 @@ public class MainActivity extends BridgeActivity {
      *
      * A failure here must not block startup: the UI still works, it just gets frozen
      * when backgrounded. The UI switch reflects the real state and can retry by hand.
+     *
+     * 先说权限:connectedDevice 这个前台服务类型要求**已授予的**蓝牙权限之一
+     * (BLUETOOTH_CONNECT 等),而它们是运行时权限 —— 全新安装后第一次启动时一个
+     * 都没有。不先看一眼就直接起,服务会在 startForeground 抛 SecurityException,
+     * 而那是 App 启动路径上的调用,结果是**启动即闪退**,用户连界面都看不到。
+     *
+     * The permission check comes first: the connectedDevice foreground service type
+     * requires one of the Bluetooth permissions to be **granted**, and those are runtime
+     * permissions — a fresh install has none. Starting regardless makes startForeground
+     * throw SecurityException on the app's startup path, and the result is **a crash on
+     * launch**, before the user sees anything.
      */
     private void startKeepAlive() {
+        if (PrinterService.isRunning()) return;
+
+        // Android 12 (API 31) 起 BLUETOOTH_CONNECT 才是运行时权限,之前不存在
+        // BLUETOOTH_CONNECT only became a runtime permission in Android 12 (API 31)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
+                   != PackageManager.PERMISSION_GRANTED) {
+            Log.i(TAG, "蓝牙权限未授予,后台常驻暂不启动;授权后回到界面会自动开启 / "
+                    + "BLUETOOTH_CONNECT not granted; keep-alive deferred until it is");
+            return;
+        }
+
         if (PrinterService.start(this)) {
             Log.i(TAG, "后台常驻已开启 / keep-alive on");
         } else {
