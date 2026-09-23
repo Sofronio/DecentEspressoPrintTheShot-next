@@ -137,11 +137,27 @@
     </ol>
   </div>
 
+  <!-- 备份与恢复 / backup & restore -->
+  <div class="card">
+    <h2 id="h-backup"></h2>
+    <p>
+      <button class="btn" id="btn-backup-export" onclick="exportBackup()"></button>
+      <button class="btn" id="btn-backup-import" onclick="importBackup()"></button>
+      <!-- 浏览器里导入走这个 input;APK 里走原生文件选择器(见 importBackup) -->
+      <!-- The browser import path uses this input; inside the APK the native picker does -->
+      <input type="file" id="backup-file" accept=".zip,application/zip" style="display:none">
+    </p>
+    <div class="note" id="backup-note"></div>
+  </div>
+
   <!-- 服务更新 / service update -->
   <div class="card">
     <h2 id="h-update"></h2>
     <p>
-      <button class="btn" id="btn-check-update" onclick="checkUpdate()"></button>
+      <!-- 两个频道各查各的:稳定版只在正式版里挑,Beta 版把 beta 一起挑上 -->
+      <!-- Two channels, checked separately: stable looks at finals only, beta includes betas -->
+      <button class="btn" id="btn-check-stable" onclick="checkUpdate('stable')"></button>
+      <button class="btn" id="btn-check-beta" onclick="checkUpdate('beta')"></button>
       <button class="btn red" id="btn-update-service" onclick="updateService()" disabled></button>
     </p>
     <div class="note" id="update-note"></div>

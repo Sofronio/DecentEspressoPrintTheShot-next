@@ -239,6 +239,64 @@ public class ShotStore {
         }
     }
 
+    /**
+     * 导入一条备份里的 shot / import one shot out of a backup archive.
+     *
+     * 和 save() 有两处刻意的区别:
+     *
+     * 1. **按文件名覆盖**,而不是另生成一个名字 —— 导入是「恢复」,同名就意味着
+     *    回到包里存的那一份。这也是它和上传唯一该有的语义差别。
+     * 2. **不入打印队列**。save() 会入队,是因为它经手的每一条都是刚从机器上打
+     *    出来的、正等着出纸;恢复历史不是新数据,不该因为它而吐纸。
+     *
+     * 机器名记 UNKNOWN:它只存在于索引里,备份包里没有这个信息 —— 和 loadIndex()
+     * 目录扫描兜底时的做法一致。
+     *
+     * Two deliberate differences from save():
+     *
+     * 1. It overwrites by filename rather than minting a new one — an import is a
+     *    restore, so a matching name means going back to the archived copy. This is the
+     *    one semantic difference there should be between an import and an upload.
+     * 2. It does not queue a print. save() queues because everything it handles came off
+     *    the machine just now and is waiting for paper; restoring history is not new
+     *    data and must not produce paper.
+     *
+     * The machine ID is recorded as UNKNOWN: it lives only in the index and a backup
+     * archive does not carry it — the same choice loadIndex() makes when it falls back to
+     * scanning the directory.
+     */
+    public JSONObject importFile(String filename, byte[] body) throws Exception {
+        // 名字再取一次 basename —— 调用方已经取过,这里再取一次是因为这是最后一道
+        // 关口:写盘的地方自己负责,不能指望上游。`../` 在这里被彻底挡掉。
+        //
+        // Take the basename again. The caller already did, but this is the last gate
+        // before the disk and it does not trust upstream to have done it: a `../` dies
+        // here.
+        String safe = new File(filename).getName();
+        JSONObject shot = new JSONObject(new String(body, StandardCharsets.UTF_8));
+
+        File f = new File(dir, safe);
+        try (FileOutputStream out = new FileOutputStream(f)) {
+            out.write(body);
+        }
+
+        synchronized (lock) {
+            // 同名旧条目先摘掉,否则索引里会留下两条指向同一个文件的记录
+            // Drop any same-named entry first, or the index keeps two records pointing
+            // at one file.
+            for (int i = index.size() - 1; i >= 0; i--) {
+                if (safe.equals(index.get(i).optString("filename"))) {
+                    index.remove(i);
+                }
+            }
+            JSONObject meta = metaFromFile(f, "UNKNOWN", body.length);
+            index.add(meta);
+            sortIndex();
+            persistIndex();
+            return meta;
+        }
+    }
+
     public File fileFor(String name) {
         // basename:文件名来自 URL 查询参数,不能让它跳出数据目录
         // basename only: the name comes from a URL query parameter and must not escape

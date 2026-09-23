@@ -49,7 +49,73 @@ import re
 from datetime import datetime
 from io import BytesIO
 
-VERSION = "2.1-beta.3"
+# 版本号。**唯一来源** —— 界面标题、Android 的 versionName、发布 tag 都从这里走。
+#
+# 编号方案:`1.0.0-beta.N` 是 beta 阶段,`1.0.0` 是第一个正式版。
+#
+# 对应关系:已发布的 **v2.1-beta.1/2/3 → v1.0.0-beta.1/2/3**(旧的 GitHub
+# release 也一并改名,历史编号就此统一),而当前这版(在 beta.3 之上还有备份
+# 导出、备份导入、真查更新)是 **1.0.0-beta.4**。
+#
+# 比较靠 _version_key 的预发布段:1.0.0-beta.4 = (1,0,0,0,4),
+# 正式版 1.0.0 = (1,0,0,1,0) —— 后者自然排在所有 beta 之后,所以
+# 「确认好了再发正式版」这件事不需要额外的代码。
+#
+# 旧号仍然要能比:还装着 2.1-beta.3 的机器必须知道自己该更新,
+# 映射写在 _version_key 里。
+#
+# The scheme: `1.0.0-beta.N` during the beta phase, `1.0.0` for the first real
+# release.
+#
+# The mapping: the released **v2.1-beta.1/2/3 become v1.0.0-beta.1/2/3** (the old
+# GitHub releases are renamed too, so the numbering is uniform from here on), and
+# this build — carrying backup export, backup import and a real update check on top
+# of beta.3 — is **1.0.0-beta.4**.
+#
+# The ordering rides on the prerelease segment in _version_key: 1.0.0-beta.4 is
+# (1,0,0,0,4) and the final 1.0.0 is (1,0,0,1,0), which sorts after every beta — so
+# "confirm it, then cut a real release" needs no extra code.
+#
+# The version. **Single source** — the UI title, the Android versionName and the
+# release tag all come from here.
+#
+# The scheme: `1.0.0-beta.N` during the beta phase, `1.0.0` for the first real release.
+#
+# The mapping: the released v2.1-beta.1/2/3 were renamed to v1.0.0-beta.1/2/3 on
+# GitHub, and this build — carrying backup export, backup import and a real update
+# check on top of beta.3 — is `1.0.0-beta.4`.
+#
+# The ordering rides on the prerelease segment in _version_key: 1.0.0-beta.4 is
+# (1,0,0,0,4) and the final 1.0.0 is (1,0,0,1,0), which sorts after every beta — so
+# "confirm it, then cut a real release" needs no extra code.
+#
+# The old numbers still have to compare correctly: a machine running 2.1-beta.3 must
+# know it should update. That mapping lives in _version_key.
+VERSION = "1.0.0-beta.4"
+
+# Android 的 versionCode,**独立于 VERSION 单调递增**。
+#
+# 从前它是从 VERSION 推导的(2.1-beta.3 → 20103),换号之后那条路会出人命:
+# 同一公式对 1.0.2 得 10002,**低于所有已装 APK**,Android 会以「降级」为由
+# 拒绝安装(INSTALL_FAILED_VERSION_DOWNGRADE),用户只能卸载重装 —— 那正好
+# 会清掉他所有的 shot 数据。
+#
+# 所以它拆出来单独维护:发版时 VERSION 和 VERSION_CODE **一起改**,
+# 后者只增不减。当前值 = 上一版 20103 + 1,保证能覆盖现有安装。
+#
+# Android's versionCode, kept **independent of VERSION** and monotonically
+# increasing.
+#
+# It used to be derived from VERSION (2.1-beta.3 → 20103). After the renumbering that
+# path is dangerous: the same formula gives 1.0.2 → 10002, which is **lower than every
+# installed APK**, so Android refuses the install as a downgrade
+# (INSTALL_FAILED_VERSION_DOWNGRADE) and the user has to uninstall — which is exactly
+# what wipes all their shot data.
+#
+# So it is maintained separately: bump VERSION and VERSION_CODE **together** on every
+# release, and the latter only ever goes up. Current value = previous 20103 + 1, so it
+# covers existing installs.
+VERSION_CODE = 20104
 
 def runtime_data_dir():
     """
@@ -95,6 +161,16 @@ MAX_USERS = 5
 # rejecting anything clearly bogus.
 MAX_PRINT_BODY = 8 * 1024 * 1024
 
+# 备份 zip 的上传上限。一条 shot 的 JSON 约 20-40KB,5000 条也就 200MB 上下,
+# 但真到那个量级应该先分卷 —— 这里给 64MB,够覆盖正常的一次完整导出,同时挡住
+# 明显异常的请求。解压后总量另设上限(见 handle_backup_import),防 zip 炸弹。
+# Cap on an uploaded backup zip. One shot's JSON is roughly 20-40KB, so 64MB covers a
+# normal full export while still rejecting anything clearly bogus. The *inflated* size
+# gets its own cap inside handle_backup_import, which is what stops a zip bomb.
+MAX_BACKUP_BODY = 64 * 1024 * 1024
+MAX_BACKUP_UNPACKED = 256 * 1024 * 1024
+MAX_BACKUP_ENTRY = 8 * 1024 * 1024
+
 # 同时挂在根路径上的 web 资源 / web assets also mounted at the root
 ROOT_ASSETS = {
     "/style.css", "/app.js", "/render.js", "/printer.js", "/bt.js",
@@ -136,8 +212,143 @@ def resource_path(rel):
 # would have downgraded users to v1.6.
 _REPO = "Sofronio/DecentEspressoPrintTheShot-next"
 PLUGIN_GITHUB_URL = f"https://raw.githubusercontent.com/{_REPO}/main/plugin/plugin.tcl"
-RAW_SERVER_URL = f"https://raw.githubusercontent.com/{_REPO}/main/print_the_shot_server.py"
-GITHUB_ZIP_URL = f"https://codeload.github.com/{_REPO}/zip/refs/heads/main"
+
+# 自更新与「检查更新」现在都以**最新 release** 为准,而不是 main 分支。
+#
+# 为什么改 —— 跟 main 有个要命的窗口期。发布流程是第 2 步改 VERSION、第 6 步才打
+# tag,中间那段时间 main 上躺着一个**已改大但还没发布**的版本号。跟 main 的话,
+# 这个窗口里每个源码版用户都会被提示「有更新」,而点下去装到的是没发过、没人测过
+# 的代码。跟 release 之后,「有更新」永远等于「有一个已发布、测过的版本」。
+#
+# 另外两端本来就只能跟 release:APK 和打包版都不能原地更新自己,只能把人送到
+# release 页面去下载。
+#
+# Self-update and "check for updates" both follow the **latest release** now, not main.
+#
+# Why: tracking main has a dangerous window. The release flow bumps VERSION in step 2
+# and tags in step 6, so in between, main carries a version number that is **already
+# raised but not yet released**. Tracking main would tell every source-mode user there
+# is an update, and installing it would give them code that was never released or
+# tested. Tracking the release makes "there is an update" always mean "there is a
+# released, tested version".
+#
+# The other two ends could only ever follow releases anyway: neither an APK nor a
+# packaged desktop build can replace itself, so all they can do is send the user to the
+# release page.
+GITHUB_API_RELEASES = f"https://api.github.com/repos/{_REPO}/releases?per_page=30"
+RELEASES_PAGE = f"https://github.com/{_REPO}/releases"
+
+
+def _is_prerelease(v):
+    """正式版还是预发布版 / whether a version string is a final release."""
+    return _version_key(v)[3] == 0
+
+
+def fetch_latest_release(channel="auto", local_version=None, timeout=15):
+    """
+    取 GitHub 上**本机应该看到的**最新 release,返回 (tag, 页面地址)。
+
+    为什么是列表而不是 /releases/latest
+    -----------------------------------
+    GitHub 对那个端点的定义是「最新的**非 pre-release、非 draft** 的 release」,
+    一个 pre-release 都没有时直接 **404**。而本项目在 beta 阶段**每个 release
+    都标 pre-release** —— 用 latest 的话检查更新会整个失效,而且失效方式很隐蔽:
+    返回 404 → 被我们当成「查询失败」→ 界面显示一个 ❌,而不是「有新版」。
+
+    自己从列表里挑最大还有个额外好处:**按版本号排序,而不是按发布日期**。
+    于是「发布顺序必须等于版本号顺序」这个脆弱前提就不需要了。
+
+    频道
+    ----
+    界面上有「检查更新(稳定版)」和「检查更新(Beta版)」两个按钮,对应这里的
+    channel:
+
+        stable —— 只在正式版里挑。用稳定版的人不该被推去装 beta。
+        beta   —— 正式版和 beta 一起挑。装着 beta 的人要能升到正式版。
+        auto   —— 不带参数时的默认:频道跟着本机版本走(本机是 beta 就走 beta,
+                  否则走 stable)。没有界面在用,是给直接调接口的人一个合理默认。
+
+    某个频道下一个 release 都没有(比如正式版还没发过)时返回 (None, 页面地址),
+    而不是抛异常 —— 「这个频道还没有东西」是一个正常答案,不是查询失败。
+    网络/权限问题才抛异常。
+
+    Channel
+    -------
+    The UI has two buttons — "check for updates (stable)" and "(beta)" — which map to
+    this `channel`:
+
+        stable — final releases only. Someone on a stable build should not be pushed
+                 onto a beta.
+        beta   — finals and betas together. A machine on a beta has to be able to move
+                 up to the final.
+        auto   — the default when no channel is given: follow the local version (a beta
+                 build checks the beta channel, otherwise stable). Nothing in the UI
+                 uses it; it is a sensible default for anyone calling the endpoint
+                 directly.
+
+    When a channel holds no releases at all (no stable cut yet, say) this returns
+    (None, page) rather than raising — "this channel is empty" is an answer, not a
+    lookup failure. Only network or permission problems raise.
+
+    Returns the newest release **in that channel** as (tag, html_url).
+
+    Why the list rather than /releases/latest
+    -----------------------------------------
+    GitHub defines that endpoint as "the most recent **non-prerelease, non-draft**
+    release" and answers **404** when there is no such release. This project flags
+    *every* release as a pre-release during the beta phase, so latest would break
+    update checking outright — and break it quietly: a 404 becomes our "lookup failed"
+    path, showing a ❌ rather than "there is a new version".
+
+    Picking the maximum ourselves also has a bonus: the ordering is **by version, not
+    by publish date**, so the fragile "release order must match version order"
+    precondition disappears.
+
+    Why filter by the local version
+    -------------------------------
+    Someone already on a final release should not be pushed onto a beta. So a final
+    local version picks among final releases only, while a beta local version considers
+    both (it has to be able to move up to the final one).
+
+    失败时抛异常 —— 调用方负责把它变成一句诚实的错误,而不是一个结论。
+    Raises on failure; callers turn that into an honest error rather than a verdict.
+    """
+    import urllib.request, json as _json
+    local = local_version or VERSION
+    req = urllib.request.Request(GITHUB_API_RELEASES, headers={
+        # GitHub API 不带 User-Agent 会直接 403,不是可选项
+        # The GitHub API answers 403 without a User-Agent; it is not optional.
+        "User-Agent": "PrintTheShotNext/" + VERSION,
+        "Accept": "application/vnd.github+json",
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        releases = _json.loads(r.read().decode("utf-8", "replace"))
+
+    if channel == "beta":
+        want_prerelease = True
+    elif channel == "stable":
+        want_prerelease = False
+    else:                       # auto:频道跟着本机版本走
+        want_prerelease = _is_prerelease(local)
+
+    best_tag, best_url = None, RELEASES_PAGE
+    for rel in releases:
+        if rel.get("draft"):
+            continue
+        if rel.get("prerelease") and not want_prerelease:
+            continue
+        tag = rel.get("tag_name", "")
+        if not tag:
+            continue
+        if best_tag is None or _version_key(tag) > _version_key(best_tag):
+            best_tag, best_url = tag, rel.get("html_url", RELEASES_PAGE)
+
+    # 频道为空不算错误 —— 调用方据此说「这个频道还没有版本」,而不是报一个查不到的错
+    # An empty channel is not an error; callers say "nothing in this channel yet"
+    # rather than reporting a lookup failure.
+    return best_tag, best_url
+
+
 WEB_INDEX = resource_path(os.path.join("web", "index.html"))
 PLUGIN_TCL = resource_path(os.path.join("plugin", "plugin.tcl"))  # bundle内(只读)
 
@@ -150,10 +361,10 @@ def _version_key(v):
     比较结果相等 —— 「检查更新」会告诉 beta.2 的用户「已是最新」,而实际上不是。
     预发布版本更新得越勤,这个 bug 越致命。
 
-        '2.0-beta.2' -> (2, 0, 0, 0, 2)
-        '2.0-beta.3' -> (2, 0, 0, 0, 3)     比上面大
-        '2.0'        -> (2, 0, 0, 1, 0)     正式版排在所有同名预发布之后
-        '2.1-beta.1' -> (2, 1, 0, 0, 1)
+        '1.0.0-beta.3' -> (1, 0, 0, 0, 3)
+        '1.0.0-beta.4' -> (1, 0, 0, 0, 4)   比上面大
+        '1.0.0'        -> (1, 0, 0, 1, 0)   正式版排在所有同名 beta 之后
+        '2.1-beta.3'   -> (1, 0, 0, 0, 3)   旧编号,映射成 1.0.0-beta.3
 
     第四位是「是否正式版」的哨兵:0 = 预发布,1 = 正式版。
 
@@ -166,6 +377,17 @@ def _version_key(v):
     """
     import re
     v = (v or "").strip()
+
+    # release tag 带 v 前缀(v1.0.0-beta.3),而 re.match 是从头匹配的 —— 不剥掉的话
+    # 它直接解析失败、落到 (0,0,0,0,0),于是**远端永远显示得比本地旧**,界面永远说
+    # 「已是最新」。这跟上面 docstring 里那段历史是同一类错误。
+    #
+    # Release tags carry a leading v (v1.0.0-beta.3) and re.match anchors at the start,
+    # so without stripping it the tag fails to parse and lands on (0,0,0,0,0) — making
+    # the remote look **older than anything local**, so the UI would say "up to date"
+    # forever. Same family as the history in the docstring above.
+    v = v.lstrip("vV")
+
     m = re.match(r"(\d+)\.(\d+)(?:\.(\d+))?", v)
     if not m:
         return (0, 0, 0, 0, 0)
@@ -173,7 +395,22 @@ def _version_key(v):
     patch = int(m.group(3) or 0)
     pre = re.search(r"(alpha|beta|rc|next|pre)[.\-]?(\d+)", v, re.I)
     if pre:
-        return (major, minor, patch, 0, int(pre.group(2)))
+        n = int(pre.group(2))
+        # 旧编号时代(2.1-beta.N)映射成 1.0.0-beta.N —— 也就是那些 release
+        # 改名之后的名字,一一对应。
+        #
+        # 不映射的话,还装着 2.1-beta.3 的机器会拿 2.1 和 1.0 比,得出「我更新」,
+        # 从此再也收不到更新 —— 那正是这个函数当初要修的那类「谎报已是最新」。
+        #
+        # Versions from the old numbering (2.1-beta.N) map to 1.0.0-beta.N — exactly
+        # the names those releases were renamed to, one for one.
+        #
+        # Without that, a machine on 2.1-beta.3 compares 2.1 against 1.0, concludes it
+        # is ahead, and never sees another update — the same "up to date" lie this
+        # function exists to prevent.
+        if major == 2:
+            return (1, 0, 0, 0, n)
+        return (major, minor, patch, 0, n)
     return (major, minor, patch, 1, 0)
 
 def perform_update(zip_url, base_dir, lang="zh"):
@@ -430,11 +667,25 @@ LANGUAGES = {
         "translate_done": "Translated and re-rendered",
         "update_title": "Service Update",
         "btn_check_update": "Check for updates",
+        "btn_check_stable": "Check (stable)",
+        "btn_check_beta": "Check (beta)",
+        "update_channel_empty": "Nothing released in this channel yet",
+        "update_channel_stable": "stable",
+        "update_channel_beta": "beta",
         "btn_update_service": "Update service from GitHub (auto backup)",
         "update_check": "Local {local} · Remote {remote}",
         "update_ok": "Up to date",
         "update_avail": "Update available",
         "update_note": "Auto-backup to backup/ before updating; restart the server after update; packaged builds can't self-update.",
+        "update_unsupported": "This build updates by installing a new APK — online update is not available.",
+        "btn_update_apk": "Download the new APK",
+        "update_apk_hint": "Updates come as a new APK. Check for updates to see if one is out.",
+        "btn_update_installer": "Get the new installer",
+        "update_installer_hint": "This packaged build cannot update itself. Check for updates, then download the new installer.",
+        "h_backup": "Backup & restore",
+        "btn_backup_export": "Export backup",
+        "btn_backup_import": "Restore from backup",
+        "backup_note": "Export downloads a ZIP of all shot records. Importing overwrites records with the same filename — it is a restore, not a merge.",
     },
     "zh": {
         "server_title": "PrintTheShot Next 服务器 v{VERSION}",
@@ -602,11 +853,25 @@ LANGUAGES = {
         "translate_done": "已翻译并重新渲染",
         "update_title": "服务更新",
         "btn_check_update": "检查更新",
+        "btn_check_stable": "检查更新(稳定版)",
+        "btn_check_beta": "检查更新(Beta版)",
+        "update_channel_empty": "这个频道还没有发布过版本",
+        "update_channel_stable": "稳定版",
+        "update_channel_beta": "Beta版",
         "btn_update_service": "从 GitHub 更新服务(自动备份)",
         "update_check": "当前 {local} · 远程 {remote}",
         "update_ok": "已是最新",
         "update_avail": "有更新可用",
         "update_note": "更新前自动备份到 backup/ 目录;更新后请重启服务器;打包版不支持在线更新。",
+        "update_unsupported": "本版通过安装新 APK 更新,不支持在线更新。",
+        "btn_update_apk": "下载新 APK",
+        "update_apk_hint": "更新通过安装新 APK 完成。点「检查更新」看看有没有新版。",
+        "btn_update_installer": "下载新安装包",
+        "update_installer_hint": "打包版不能自动更新。点「检查更新」看看有没有新版,然后去发布页面下载安装包。",
+        "h_backup": "备份与恢复",
+        "btn_backup_export": "导出备份",
+        "btn_backup_import": "从备份恢复",
+        "backup_note": "导出会下载一个包含全部 shot 记录的 ZIP。导入会按文件名覆盖同名记录 —— 是恢复,不是合并。",
     },
 }
 
@@ -1313,6 +1578,8 @@ class PrintTheShotHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_plugin_update()
         elif path == "/api/update":
             self.handle_update()
+        elif path == "/api/backup/import":
+            self.handle_backup_import()
         elif path == "/api/settings/ai":
             self.save_ai_settings()
         elif path == "/api/languages":
@@ -1364,6 +1631,15 @@ class PrintTheShotHandler(http.server.SimpleHTTPRequestHandler):
             # 前端据此决定要不要显示「停止服务」按钮(见 show_stop_button)
             # The front end uses this to decide whether to offer the stop button
             "show_stop_button": show_stop_button(),
+            # 第二个更新按钮的职责,和 /api/update/check 返回的是同一个词。放在这里
+            # 是因为**界面一加载就要知道该写什么文案**,而不是等用户点了「检查更新」
+            # 才知道。Android 由它自己的服务端回 "apk"。
+            #
+            # What the second update button is for, the same word /api/update/check
+            # returns. It is here because **the UI has to label the button as soon as it
+            # loads**, not only after the user clicks "check for updates". Android answers
+            # "apk" from its own server.
+            "update_via": "installer" if getattr(sys, "frozen", False) else "self",
         })
 
     def send_queue_status(self):
@@ -1468,32 +1744,153 @@ class PrintTheShotHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"success": False, "error": str(e)}, 500)
 
     def check_update(self):
-        """GET /api/update/check — 对比本地与GitHub远端版本"""
-        import urllib.request, re
+        """
+        GET /api/update/check — 查 GitHub 上最新的 release,和本机版本比。
+
+        数据源是 release 而不是 main 分支,理由见 GITHUB_API_LATEST 上面那段:
+        跟 main 会把「已改版本号但还没发布」的代码推给用户。
+
+        返回里带 `update_via`,前端据此决定第二个按钮干什么:
+
+            self      —— 源码运行,能原地更新。按钮 = 从 GitHub 更新服务
+            installer —— 打包版,不能原地更新自己。按钮 = 去下载新安装包
+            (Android 由它自己的服务端回 apk,按钮 = 下载新 APK)
+
+        三种情况下**前台界面走同一条逻辑**,差别只在服务端这一句话里。
+
+        Checks the latest GitHub release against the local version. The source is the
+        release rather than main for the reason given above GITHUB_API_LATEST: tracking
+        main hands users code whose version was bumped but never released.
+
+        The response carries `update_via`, which is what the front end uses to decide
+        what the second button does:
+
+            self      — source mode, can update in place. Button = update from GitHub
+            installer — packaged build, cannot replace itself. Button = get the installer
+            (Android answers `apk` from its own server: button = download the APK)
+
+        All three take the same path through the UI; the whole difference is this one
+        word from the server.
+        """
         try:
-            req = urllib.request.Request(RAW_SERVER_URL, headers={"User-Agent": "PrintTheShotBeta"})
-            with urllib.request.urlopen(req, timeout=15) as r:
-                content = r.read().decode("utf-8", "replace")
-            m = re.search(r'VERSION\s*=\s*"([^"]+)"', content)
-            remote = m.group(1) if m else "unknown"
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            channel = q.get("channel", ["auto"])[0]
+            if channel not in ("auto", "stable", "beta"):
+                channel = "auto"
+            tag, page = fetch_latest_release(channel=channel)
+
+            # 频道里一个版本都没有(比如正式版还没发过)—— 这是一个**答案**,不是错误。
+            # 说清楚它,而不是报一个「查询失败」,更不是报「已是最新」:后者会让用户
+            # 以为稳定版就是当前这个 beta,那是假的。
+            #
+            # An empty channel (no stable cut yet, say) is an **answer**, not an error.
+            # Say so, rather than reporting a failed lookup — and certainly not "up to
+            # date", which would imply the stable release is this beta, and that is
+            # false.
+            if not tag:
+                zh = current_language == "zh"
+                self._send_json({
+                    "success": True,
+                    "local": VERSION,
+                    "remote": "",
+                    "channel": channel,
+                    "update_available": False,
+                    "release_url": page,
+                    "update_via": "installer" if getattr(sys, "frozen", False) else "self",
+                    "message": ("这个频道还没有发布过版本" if zh
+                                else "Nothing has been released in this channel yet"),
+                })
+                return
+
+            remote = tag
+            # success 是给前端的「这次真的查了」信号。没有它,前端只能靠
+            # update_available 的真假去猜,而「查了、是最新」和「压根没查」
+            # 在那个字段上长得一模一样 —— Android 端就是这么显示成绿色的
+            # 「已是最新」的。
+            #
+            # success tells the front end "this check really happened". Without it the
+            # front end can only infer from update_available, and "checked, up to date"
+            # looks exactly like "never checked" on that field — which is how the
+            # Android build came to show a green "up to date" without checking at all.
             self._send_json({
+                "success": True,
                 "local": VERSION,
                 "remote": remote,
-                "update_available": remote != "unknown" and _version_key(remote) > _version_key(VERSION),
+                "channel": channel,
+                "update_available": _version_key(remote) > _version_key(VERSION),
+                "release_url": page,
+                "update_via": "installer" if getattr(sys, "frozen", False) else "self",
             })
         except Exception as e:
-            self._send_json({"error": str(e)}, 500)
+            # 查不到就说查不到,绝不退化成「已是最新」—— 那是这个端点最早的毛病。
+            # A failed check says so and never degrades into "up to date" — that was
+            # this endpoint's original sin.
+            self._send_json({"success": False, "error": str(e),
+                             "release_url": RELEASES_PAGE}, 500)
 
     def handle_update(self):
-        """POST /api/update — 从GitHub更新整个服务(自动备份);打包版不支持"""
+        """
+        POST /api/update — 安装**最新 release**,而不是 main 分支。
+
+        和 /api/update/check 用同一个数据源:检查说哪个版本,装的就是哪个版本。
+        两者不一致的话,界面会承诺一个版本、装出另一个 —— 那比「不能更新」还糟。
+
+        打包版拒绝,并把 release 页面一并给出去。从前只回一句「请下载新安装包」,
+        没有链接,用户只能自己去搜。
+
+        Installs the **latest release**, not main — the same source /api/update/check
+        uses, so the version the check reported is the version installed. A mismatch
+        would promise one version and deliver another, which is worse than not updating
+        at all.
+
+        A packaged build refuses and hands back the release page. It used to answer only
+        "download the new installer", with no link, leaving the user to go searching.
+        """
         global current_language
+        zh = current_language == "zh"
         if getattr(sys, "frozen", False):
-            msg = ("打包版本不支持在线更新,请下载新安装包" if current_language == "zh"
-                   else "Packaged build can't self-update — download the new installer")
-            self._send_json({"success": False, "message": msg})
+            msg = ("打包版本不支持在线更新,请到发布页面下载新安装包" if zh
+                   else "Packaged build can't self-update — get the new installer from the release page")
+            self._send_json({"success": False, "message": msg,
+                             "release_url": RELEASES_PAGE})
             return
-        ok, msg = perform_update(GITHUB_ZIP_URL, os.getcwd(), current_language)
-        self._send_json({"success": ok, "message": msg}, 200 if ok else 500)
+        # 装**界面刚查过的那个频道**,而不是自己另选一个。检查说哪个版本,装的就是
+        # 哪个版本 —— 两处不一致的话,界面会承诺一个版本、装出另一个。
+        #
+        # Install what the UI just checked, not a channel chosen independently here. The
+        # version the check reported must be the version installed; otherwise the UI
+        # promises one version and delivers another.
+        channel = "auto"
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if length:
+                channel = json.loads(self.rfile.read(length).decode("utf-8")).get("channel", "auto")
+        except Exception:
+            pass          # 没带 body 就用默认 / no body means the default
+        if channel not in ("auto", "stable", "beta"):
+            channel = "auto"
+
+        try:
+            tag, page = fetch_latest_release(channel=channel)
+            if not tag:
+                raise ValueError("这个频道还没有发布过版本 / nothing released in this channel yet")
+        except Exception as e:
+            self._send_json({
+                "success": False,
+                "message": ("查询最新版本失败:" if zh else "Could not look up the latest version: ") + str(e),
+                "release_url": RELEASES_PAGE,
+            }, 500)
+            return
+        # tag 的 zip 根目录名和 main 的不同(仓库名-1.0.3 vs 仓库名-main),但
+        # perform_update 的根目录是**从包里现取**的,所以这里不用额外处理。
+        #
+        # A tag zip has a different root folder than main's (repo-1.0.3 vs repo-main),
+        # but perform_update reads the root out of the archive itself, so nothing extra
+        # is needed here.
+        zip_url = f"https://codeload.github.com/{_REPO}/zip/refs/tags/{tag}"
+        ok, msg = perform_update(zip_url, os.getcwd(), current_language)
+        self._send_json({"success": ok, "message": msg, "release_url": page},
+                        200 if ok else 500)
 
     # ---------- AI 翻译设置 / AI translation settings ----------
     def send_ai_settings(self):
@@ -1903,6 +2300,140 @@ class PrintTheShotHandler(http.server.SimpleHTTPRequestHandler):
         print("💾 已导出备份 / backup exported:%d 个文件,%.1f KB"
               % (count, len(payload) / 1024.0))
 
+    def handle_backup_import(self):
+        """
+        POST /api/backup/import —— 收下一个备份 zip,把里面的 shot 恢复回 DATA_DIR。
+
+        语义是**恢复**,不是合并:同名文件直接覆盖。这正是「导回」该有的样子 ——
+        用户拿着备份回来,期望的是回到导出时的样子,而不是新旧混在一起。
+
+        三条纪律:
+        - 条目名一律取 basename。备份包里出现 `../` 说明它要么是坏的、要么是恶意
+          的,两种都不该落盘。
+        - 跳过 index.json —— 它是生成物,导入后由 load_history() 扫描目录重建,
+          比信任包里那份更可靠。
+        - 不触发打印、不入队。恢复历史不是新数据,不该出纸。
+
+        Semantics are **restore**, not merge: a file with the same name is overwritten.
+        That is what "import my backup" should mean — the user expects to get back what
+        they exported, not a blend of old and new.
+
+        Three rules: entry names are always reduced to their basename (a `../` inside a
+        backup is either corrupt or hostile, and neither belongs on the disk); index.json
+        is skipped because it is derived and load_history() rebuilds it more reliably by
+        scanning; and nothing is printed or queued, because restoring history is not new
+        data.
+        """
+        import io
+        import zipfile
+
+        try:
+            content_type = self.headers.get("Content-Type", "")
+            length = int(self.headers.get("Content-Length", 0))
+            if length <= 0:
+                self._send_json({"success": False, "message": "空请求 / empty body"}, 400)
+                return
+            if length > MAX_BACKUP_BODY:
+                self._send_json({
+                    "success": False,
+                    "message": "备份包过大 / backup too large (max %dMB)"
+                               % (MAX_BACKUP_BODY // (1024 * 1024)),
+                }, 413)
+                return
+            body = self.rfile.read(length)
+
+            if "multipart/form-data" in content_type:
+                body = self._extract_multipart_bytes(body, content_type)
+
+            imported, imported_bytes, skipped, unpacked = 0, 0, [], 0
+            with zipfile.ZipFile(io.BytesIO(body)) as z:
+                for info in z.infolist():
+                    if info.is_dir():
+                        continue
+                    entry = info.filename.replace("\\", "/")
+                    # 带 ".." 的条目直接跳过,而不是安静地取个 basename 收下 ——
+                    # 包里出现 `../` 只有两种可能:坏了,或者恶意。两种都不该被
+                    # 当作一条正常记录导进来,用户也该在「跳过」里看到它。
+                    #
+                    # Entries containing ".." are skipped rather than quietly taken under
+                    # their basename: a `../` in an archive is either corrupt or hostile,
+                    # and neither should come in as a legitimate record. The user should
+                    # see it listed as skipped.
+                    if ".." in entry.split("/"):
+                        skipped.append(info.filename)
+                        continue
+                    # 仍然只取 basename 落盘:这是最后一道关口,不指望上面那行。
+                    # Still write under the basename: this is the last gate before the
+                    # disk, and it does not rely on the check above.
+                    name = os.path.basename(entry)
+                    if not name.endswith(".json") or name == "index.json":
+                        skipped.append(info.filename)
+                        continue
+                    # 按**实际读出的字节数**设限,而不是信 zip 头里声明的 file_size ——
+                    # 声明值可以撒谎,读出来的不会。(zip 炸弹正是靠撒谎的那个数。)
+                    #
+                    # Cap on the bytes actually read, not on the declared file_size: the
+                    # header can lie, the bytes cannot. (A zip bomb is exactly a lie in
+                    # that header.)
+                    with z.open(info) as fp:
+                        raw = fp.read(MAX_BACKUP_ENTRY + 1)
+                    if (len(raw) > MAX_BACKUP_ENTRY
+                            or unpacked + len(raw) > MAX_BACKUP_UNPACKED):
+                        skipped.append(info.filename)
+                        continue
+                    unpacked += len(raw)
+                    try:
+                        shot = json.loads(raw.decode("utf-8"))
+                    except Exception:
+                        # 坏条目跳过而不是整体失败:一个坏文件不该让其余 199 条白导
+                        # Skip the bad entry instead of failing the whole import: one
+                        # malformed file should not cost the other 199.
+                        skipped.append(info.filename)
+                        continue
+                    with open(os.path.join(DATA_DIR, name), "w", encoding="utf-8") as f:
+                        json.dump(shot, f, ensure_ascii=False, indent=2)
+                    imported += 1
+                    imported_bytes += os.path.getsize(os.path.join(DATA_DIR, name))
+
+            # 索引重建交给 load_history():它 index.json 优先、目录扫描兜底,比在这里
+            # 手工拼一条更可靠 —— 何况我们刚跳过包里的 index.json,本来就该重建。
+            #
+            # Let load_history() rebuild the index: it prefers index.json and falls back
+            # to scanning the directory, which beats assembling entries by hand — and
+            # since the archive's own index.json was just skipped, a rebuild is due.
+            load_history()
+
+            # 备份纪律:验证**内容**,而不是「文件生成了」。这两行打印实际落盘的条数
+            # 和字节数 —— 数字不对就是没导成,别让它看起来像成了。
+            #
+            # Backup discipline: verify the *content*, not that "a file appeared". These
+            # two lines report what actually landed; wrong numbers mean the import did
+            # not work, and nothing should suggest otherwise.
+            print("📥 已导入备份 / backup imported:%d 条(%.1f KB),跳过 %d 条"
+                  % (imported, imported_bytes / 1024.0, len(skipped)))
+            for name in skipped:
+                print("   跳过 / skipped: %s" % name)
+
+            zh = current_language == "zh"
+            msg = ("已恢复 %d 条记录" % imported) if zh else ("Restored %d shot(s)" % imported)
+            if skipped:
+                msg += (",跳过 %d 条" % len(skipped)) if zh else (", skipped %d" % len(skipped))
+            self._send_json({
+                "success": True,
+                "imported": imported,
+                "skipped": skipped,
+                "message": msg,
+            })
+
+        except zipfile.BadZipFile:
+            self._send_json({
+                "success": False,
+                "message": ("这不是有效的备份包(不是 zip 文件)" if current_language == "zh"
+                            else "Not a valid backup archive (not a zip file)"),
+            }, 400)
+        except Exception as e:
+            self._send_json({"success": False, "message": str(e)}, 500)
+
     def send_shot_detail(self):
         """
         GET /api/shot?file=<filename>&lang=<code>
@@ -2087,19 +2618,42 @@ class PrintTheShotHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self.send_error(400, f"Upload error: {e}")
 
+    def _extract_multipart_bytes(self, post_data, content_type):
+        """极简multipart解析:取出第一个文件字段的**原始字节**。
+
+        和 _extract_multipart_json 是同一件事,区别只在于全程不解码 —— 备份包是
+        zip(二进制),先 decode 成 str 会把内容毁掉。
+
+        The minimal multipart parse: pull the raw bytes of the first file field. Same job
+        as _extract_multipart_json except nothing is ever decoded — a backup is a zip
+        (binary), and decoding it to str first would corrupt it.
+        """
+        import re
+        m = re.search(r"boundary=([^;]+)", content_type)
+        if not m:
+            raise ValueError("multipart 缺少 boundary / no boundary in content-type")
+        marker = b"--" + m.group(1).strip('"').encode()
+        for part in post_data.split(marker):
+            if b"filename=" not in part[:400]:
+                continue
+            header_end = part.find(b"\r\n\r\n")
+            if header_end <= 0:
+                continue
+            body = part[header_end + 4:]
+            # 结尾那个 CRLF 是 boundary 前的分隔符,不算内容,精确去掉两个字节。
+            # 不能用 rstrip():二进制内容末尾真的以 CRLF 结束时会被误删。
+            #
+            # The trailing CRLF separates the content from the boundary and is not part
+            # of it — drop exactly those two bytes. rstrip() is wrong here: binary
+            # content that genuinely ends in CRLF would lose it.
+            if body.endswith(b"\r\n"):
+                body = body[:-2]
+            return body
+        raise ValueError("No file part found in multipart data")
+
     def _extract_multipart_json(self, post_data, content_type):
         """极简multipart解析:取出第一个文件字段的JSON内容"""
-        import re
-        boundary = re.search(r"boundary=([^;]+)", content_type).group(1).strip('"')
-        parts = post_data.split(("--" + boundary).encode())
-        for part in parts:
-            if b"filename=" in part[:400]:
-                header_end = part.find(b"\r\n\r\n")
-                if header_end > 0:
-                    body = part[header_end + 4:]
-                    body = body.replace(b"\r\n--", b"").rstrip()
-                    return json.loads(body.decode("utf-8"))
-        raise ValueError("No file part found in multipart data")
+        return json.loads(self._extract_multipart_bytes(post_data, content_type).decode("utf-8"))
 
     def _process_shot(self, filepath, filename, shot_id, machine_id, data_size):
         global current_language

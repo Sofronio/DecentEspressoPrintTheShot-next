@@ -280,6 +280,14 @@ async function loadStatus() {
   // 只有 macOS 打包版才需要这个按钮(见服务端 show_stop_button 的说明)
   // Only a packaged macOS build needs this button; see show_stop_button
   document.getElementById('btn-shutdown').style.display = s.show_stop_button ? '' : 'none';
+
+  // 第二个更新按钮的职责由服务端说了算 —— 见 /api/status 的 update_via。
+  // 判断依据来自真正提供服务的那一端,比嗅探 UA 或者猜平台可靠。
+  //
+  // What the second update button is for is the server's call — see update_via in
+  // /api/status. That beats sniffing the UA or guessing from the platform: the answer
+  // comes from the side actually serving requests.
+  applyUpdateButton(s.update_via);
   // 平板的局域网地址 —— 用户要把它填进 DE1 插件,把 shot 传到这台平板上。
   // 这是整个界面上最需要被看到的一行:没有它,用户不知道该往哪儿传数据。
   //
@@ -777,22 +785,288 @@ async function clearQueue() {
 }
 
 
-async function checkUpdate() {
-  const btn = document.getElementById('btn-check-update');
+// =========================================================================
+// 备份与恢复 / backup & restore
+// =========================================================================
+//
+// 为什么这两个按钮必须存在
+// ------------------------
+// 原来的「备份」只在服务更新流程里自动跑一次:用户看不到、也调不到,而它能救的
+// 场景只有一个。真正会丢数据的是**卸载重装**(Android 卸载会清掉应用私有目录)
+// 和**换设备** —— 那两件事都发生在 App 之外,App 没有任何机会先备份自己。
+//
+// 所以备份必须是用户能主动导出、随时能导回的东西。只导出不能导入等于没备份:
+// 恢复才是这个功能的全部意义。
+//
+// Why these two buttons have to exist: the old backup ran once, automatically, inside
+// the service-update flow — invisible and unreachable. The things that actually lose
+// data are **uninstalling** (which wipes the app's private directory) and **switching
+// devices**, and both happen outside the app, so it never gets a chance to back itself
+// up first. Backup has to be something the user runs on demand and restores from.
+//
+// Export without import is not a backup: restoring is the entire point.
+
+async function exportBackup() {
+  const btn = document.getElementById('btn-backup-export');
+  const native = window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.PrintTheShotPrinter;
+
+  // APK 里必须走原生。两条弯路都实测过,都不通:直接点链接 WebView 不会保存文件;
+  // 把 URL 交给系统浏览器则**自相矛盾** —— 浏览器一起来本 App 就退到后台,而文件
+  // 要从本 App 自己的服务端取,提供文件的那一端在被取的那一刻被系统冻住,浏览器
+  // 打开的是空白页。(同 savePlugin 的注释。)
+  //
+  // Inside the APK this must go native. Both detours were measured and both fail: a
+  // plain link does nothing because a WebView does not save files, and handing the URL
+  // to the system browser is **self-defeating** — the browser takes the foreground, this
+  // app goes to the background, and the file has to come from this app's own server, so
+  // the side providing it is frozen exactly when it is asked, leaving a blank page.
+  // (Same reasoning as savePlugin.)
+  if (native && native.exportBackup) {
+    btn.disabled = true;
+    try {
+      const r = await native.exportBackup();
+      toast('✅ ' + ((r && r.message) || ''));
+    } catch (e) {
+      toast('❌ ' + ((e && e.message) || e));
+    }
+    btn.disabled = false;
+    return;
+  }
+
+  // 桌面浏览器:服务端已经带了 Content-Disposition,直接下载就好
+  // Desktop browser: the server already sets Content-Disposition, so just download.
+  location.href = url('/api/backup/export');
+}
+
+async function importBackup() {
+  const native = window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.PrintTheShotPrinter;
+  const btn = document.getElementById('btn-backup-import');
+
+  if (native && native.importBackup) {
+    // 选文件交给原生:WebView 里的 <input type=file> 拿不到稳定的真实路径。
+    // 选完之后原生直接把字节 POST 给本机服务端。
+    //
+    // The native side shows the picker: a WebView file input does not yield a reliable
+    // real path here. Once a file is chosen, the native code POSTs its bytes to the
+    // local server itself.
+    btn.disabled = true;
+    try {
+      const r = await native.importBackup();
+      toast('✅ ' + ((r && r.message) || ''));
+      loadShots();
+      loadStats();
+    } catch (e) {
+      toast('❌ ' + ((e && e.message) || e));
+    }
+    btn.disabled = false;
+    return;
+  }
+
+  document.getElementById('backup-file').click();
+}
+
+/** 浏览器里选中备份文件之后的实际上传 / the actual upload once a file is picked. */
+async function uploadBackupFile(file) {
+  if (!file) return;
+  const btn = document.getElementById('btn-backup-import');
   btn.disabled = true;
-  const r = await api('/api/update/check').catch(e => ({ error: String(e) }));
+  try {
+    // 直接发原始字节,不做表单编码 —— content-type 不是 multipart 时,服务端就把
+    // body 本身当 zip 收(见 handle_backup_import)。
+    //
+    // Send the raw bytes with no form encoding: when the content-type is not multipart
+    // the server treats the body itself as the zip (see handle_backup_import).
+    const r = await api('/api/backup/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/zip' },
+      body: file,
+    }).catch(e => ({ success: false, message: String(e) }));
+    toast((r.success !== false ? '✅ ' : '❌ ') + (r.message || ''));
+    if (r.success !== false) { loadShots(); loadStats(); }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// 最近一次「检查更新」拿到的 release 页面地址(Android 的按钮要用)。
+// The release page from the last check (what Android's button opens).
+let lastReleaseUrl = null;
+
+// 查不到 latest 时的退路,和服务端那份保持一致。
+// The fallback when latest cannot be fetched, matching the server's copy.
+const RELEASES_PAGE = 'https://github.com/Sofronio/DecentEspressoPrintTheShot-next/releases';
+
+// 用户点过「检查更新」没有。
+//
+// loadStatus 每 8 秒跑一次,会往同一块 note 里写默认提示 —— 没有这个标志的话,
+// 检查结果会被 8 秒后的那次刷新无声抹掉,用户刚看到「有更新可用」,转眼又变回
+// 一句泛泛的说明。
+//
+// Whether the user has run a check.
+//
+// loadStatus runs every 8 seconds and writes the default hint into the same note.
+// Without this flag the result is silently wiped by the next refresh: the user sees
+// "update available" and then, seconds later, a generic sentence again.
+let updateChecked = false;
+
+// 最近一次检查用的频道('stable' / 'beta')。更新按钮点了之后要装/打开**刚查过的
+// 那个频道**,所以得记住它 —— 检查和动作不一致的话,界面会承诺一个版本、装出另一个。
+//
+// The channel of the last check ('stable' / 'beta'). The update button must install or
+// open **the channel that was just checked**, so it is remembered here — a mismatch
+// would promise one version and deliver another.
+let lastChannel = 'stable';
+
+/**
+ * 按服务端给的 update_via 设置第二个更新按钮的文案与默认提示。
+ *
+ * 三个平台走的是同一条逻辑,差别只在这一个词:
+ *   self      —— 能原地更新,按钮 = 从 GitHub 更新服务
+ *   apk       —— 平板/手机(APK),按钮 = 下载新 APK,点了打开 release 页面
+ *   installer —— 打包版,按钮 = 下载新安装包,点了打开 release 页面
+ *
+ * 后两种都不能替换自己 —— 但「有没有新版」照样问得出来,这正是按钮该做的事:
+ * 把人送到新版本那里,而不是说一句「不支持」就完了。
+ *
+ * Sets the second update button's label and default hint from the server's update_via.
+ *
+ * All three platforms take the same path; the only difference is this one word:
+ *   self      — can update in place; button = update from GitHub
+ *   apk       — tablet/phone (an APK); button = download the APK, opens the release page
+ *   installer — packaged build; button = get the installer, opens the release page
+ *
+ * The latter two cannot replace themselves — but "is there a newer version" is still
+ * answerable, which is exactly what the button should do: get the user to the new
+ * version rather than stopping at "not supported".
+ */
+function applyUpdateButton(via) {
+  const btn = document.getElementById('btn-update-service');
+  if (!btn) return;
+  if (via === 'apk') {
+    btn.textContent = T('btn_update_apk');
+    if (!updateChecked) document.getElementById('update-note').textContent = T('update_apk_hint');
+  } else if (via === 'installer') {
+    btn.textContent = T('btn_update_installer');
+    if (!updateChecked) document.getElementById('update-note').textContent = T('update_installer_hint');
+  } else {
+    btn.textContent = T('btn_update_service');
+    if (!updateChecked) document.getElementById('update-note').textContent = T('update_note');
+  }
+}
+
+/**
+ * 检查更新。`channel` 是 'stable' 或 'beta',对应界面上那两个按钮。
+ *
+ * 两个频道各查各的,服务端按频道过滤:
+ *   stable —— 只在正式版里挑。用稳定版的人不该被推去装 beta。
+ *   beta   —— 正式版和 beta 一起挑,取版本号最大的那个。
+ *
+ * 为什么是两个按钮而不是一个自动判断的:用户能明确表达「我要不要 beta」。
+ * 自动判断的话,想从稳定版切到 beta 就没有入口了。
+ *
+ * Check for updates. `channel` is 'stable' or 'beta', matching the two buttons.
+ *
+ * Each channel is checked separately and the server filters accordingly:
+ *   stable — finals only. Someone on a stable build should not be pushed onto a beta.
+ *   beta   — finals and betas together, taking whichever has the highest version.
+ *
+ * Two buttons rather than one auto-detecting one so the user can say explicitly whether
+ * they want betas; with auto-detection there is no way to opt in from a stable build.
+ */
+async function checkUpdate(channel) {
+  channel = channel === 'beta' ? 'beta' : 'stable';
+  const btn = document.getElementById(channel === 'beta' ? 'btn-check-beta' : 'btn-check-stable');
+  btn.disabled = true;
+  const r = await api('/api/update/check?channel=' + channel).catch(e => ({ error: String(e) }));
   btn.disabled = false;
   const note = document.getElementById('update-note');
+  updateChecked = true;
+  lastChannel = channel;
   if (r.error) { note.textContent = '❌ ' + r.error; return; }
+
+  // 只有服务端**明确说查过了**,才允许下结论。
+  //
+  // api() 是 fetch().then(r => r.json()) —— 对 404 也照样解析 JSON、不抛异常。所以
+  // 「这个端没实现」和「查了、是最新」在过去长得一模一样:两边都是 update_available
+  // 缺席,而缺席被当成 falsy,一路落到绿色的「已是最新」。Android 端就是这么显示
+  // 「本地 undefined · 远端 undefined · ✅ 已是最新」的 —— 没检查,却给了结论。
+  //
+  // Only conclude anything when the server says it actually checked.
+  //
+  // api() is fetch().then(r => r.json()) — a 404 parses as JSON just the same and never
+  // throws. So "this build does not implement it" and "checked, up to date" used to look
+  // identical: update_available missing in both cases, and missing read as falsy, which
+  // fell all the way through to a green "up to date". That is exactly how the Android
+  // build showed "local undefined · remote undefined · ✅ up to date" — a verdict with no
+  // check behind it.
+  if (r.unsupported || r.success === false || typeof r.update_available !== 'boolean') {
+    note.textContent = 'ℹ️ ' + (r.message || T('update_unsupported'));
+    document.getElementById('btn-update-service').disabled = true;
+    return;
+  }
+
+  // 频道里一个版本都没有(比如正式版还没发过)—— 这是一个**答案**,不是错误,
+  // 更不是「已是最新」:那会让用户以为稳定版就是他正跑着的这个 beta,而那是假的。
+  //
+  // An empty channel (no stable cut yet, say) is an **answer** — not an error, and
+  // certainly not "up to date", which would imply the stable release is the beta they
+  // are running. That would be false.
+  if (!r.remote) {
+    note.textContent = 'ℹ️ ' + (r.message || T('update_channel_empty'));
+    document.getElementById('btn-update-service').disabled = true;
+    return;
+  }
+
+  // 记下 release 页面地址:不能原地更新的那两种,按钮要打开它
+  // Keep the release page URL: the two non-self-updating cases open it
+  lastReleaseUrl = r.release_url || null;
+  // 服务端的回答才是权威的(特别是它自报是打包版还是源码版),按钮文案跟着它走
+  // The server's answer is authoritative (it is the one that knows whether it is
+  // packaged), so the button label follows it
+  applyUpdateButton(r.update_via);
+
+  // 提示里带上频道名 —— 两个按钮查的是不同的东西,不写清楚就分不出这是谁的结果
+  // Name the channel in the note: the two buttons check different things, and without
+  // it there is no telling which one produced this line
+  const chan = channel === 'beta' ? T('update_channel_beta') : T('update_channel_stable');
   const state = r.update_available ? T('update_avail') : T('update_ok');
-  note.textContent = T('update_check').replace('{local}', r.local).replace('{remote}', r.remote) + ' · ' + state;
+  note.textContent = chan + ' · '
+    + T('update_check').replace('{local}', r.local).replace('{remote}', r.remote) + ' · ' + state;
   document.getElementById('btn-update-service').disabled = !r.update_available;
 }
 
 async function updateService() {
+  const via = (lastStatus && lastStatus.update_via) || 'self';
+
+  // 不能原地更新的那两种:这个按钮的职责是**把用户送到新版本那里**。
+  //
+  // 用系统浏览器打开 release 页面。页面在 GitHub 上,所以不存在插件下载踩过的
+  // 那个坑 —— 那里文件要从本 App 自己的服务端取,而浏览器一起来本 App 就退到
+  // 后台被系统冻住;这里的提供方是 GitHub,不是我们自己。
+  //
+  // The two that cannot update in place: this button's job is to get the user to the
+  // new version.
+  //
+  // The release page is on GitHub, so the trap hit by the plugin download does not
+  // apply — there the file had to come from this app's own server, which the system
+  // freezes the moment the browser takes the foreground. Here the provider is GitHub.
+  if (via !== 'self') {
+    window.open(lastReleaseUrl || RELEASES_PAGE, '_blank');
+    return;
+  }
+
   const btn = document.getElementById('btn-update-service');
   btn.disabled = true;
-  const r = await api('/api/update', { method: 'POST' }).catch(e => ({ success: false, message: String(e) }));
+  // 告诉服务端装哪个频道 —— 它必须和刚才「检查更新」查的是同一个,否则会承诺一个
+  // 版本、装出另一个。
+  //
+  // Tell the server which channel to install: it has to be the one just checked, or the
+  // UI would promise one version and deliver another.
+  const r = await api('/api/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel: lastChannel }),
+  }).catch(e => ({ success: false, message: String(e) }));
   toast((r.success ? '🔄 ' : '❌ ') + (r.message || ''));
   btn.disabled = false;
 }
@@ -817,6 +1091,17 @@ dz.addEventListener('drop', e => {
 });
 document.getElementById('drop-file').addEventListener('change', e => {
   if (e.target.files.length) uploadFile(e.target.files[0]);
+  e.target.value = '';
+});
+
+// 备份文件的 input 是隐藏的,由「从备份恢复」按钮 click() 唤起(仅浏览器路径;
+// APK 里走原生选择器,见 importBackup)。清空 value 是为了同一个文件能再选一次。
+//
+// The backup file input is hidden and opened by the restore button via click() — the
+// browser path only; inside the APK the native picker is used (see importBackup).
+// Clearing value lets the same file be picked twice in a row.
+document.getElementById('backup-file').addEventListener('change', e => {
+  uploadBackupFile(e.target.files[0]);
   e.target.value = '';
 });
 
@@ -926,9 +1211,14 @@ function initText() {
   document.getElementById('ai-enabled-label').textContent = T('ai_enabled_label');
   document.getElementById('h-languages').textContent = T('h_languages');
   document.getElementById('btn-add-lang').textContent = T('btn_add_lang');
-  document.getElementById('btn-check-update').textContent = T('btn_check_update');
+  document.getElementById('btn-check-stable').textContent = T('btn_check_stable');
+  document.getElementById('btn-check-beta').textContent = T('btn_check_beta');
   document.getElementById('btn-update-service').textContent = T('btn_update_service');
   document.getElementById('update-note').textContent = T('update_note');
+  document.getElementById('h-backup').textContent = '💾 ' + T('h_backup');
+  document.getElementById('btn-backup-export').textContent = T('btn_backup_export');
+  document.getElementById('btn-backup-import').textContent = T('btn_backup_import');
+  document.getElementById('backup-note').textContent = T('backup_note');
   document.getElementById('dropzone').textContent = T('drag_drop');
   document.getElementById('step1').textContent = T('plugin_step1');
   document.getElementById('step2').textContent = T('plugin_step2');

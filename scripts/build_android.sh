@@ -162,7 +162,7 @@ cp "$OURS/res/xml/"*.xml "$GEN/res/xml/" 2>/dev/null || true
 #
 # 生成工程里写死的是 versionCode 1 / versionName "1.0" —— Capacitor 的模板值,
 # 从来不跟 App 版本走,于是所有 APK 在系统看来都是同一个版本,「1.0」。
-# 这里每次构建按 print_the_shot_server.py 的 VERSION 改掉。
+# 这里每次构建按 print_the_shot_server.py 的 VERSION 与 VERSION_CODE 改掉。
 #
 # 签名:两个变体都用仓库里那把固定的密钥(android/signing/printtheshot.jks)。
 #
@@ -211,7 +211,8 @@ cp "$OURS/res/xml/"*.xml "$GEN/res/xml/" 2>/dev/null || true
 #
 # The generated project hard-codes versionCode 1 / versionName "1.0" — Capacitor's
 # template values, which never follow the app version, so every APK looks like the same
-# release called "1.0". Rewritten here from print_the_shot_server.py's VERSION.
+# release called "1.0". Rewritten here from VERSION and VERSION_CODE in
+# print_the_shot_server.py.
 python3 - "$REPO_ROOT" "$VARIANT" <<'PY'
 import os, re, sys
 
@@ -230,16 +231,37 @@ for line in open(os.path.join(root, "print_the_shot_server.py"), encoding="utf-8
 if not version:
     sys.exit("❌ 读不到 VERSION / could not read VERSION")
 
-# 2.1-beta.3 → code 20103。预发布用它的序号;正式版取同一 minor 下的 99,好让它
-# 排在所有同名预发布之后(和 export_strings.py 的版本比较是同一个道理)。
-# 2.1-beta.3 → 20103. A prerelease contributes its number; a final release takes 99
-# within the same minor so it sorts after every prerelease of that minor (the same
-# reasoning as the version comparison in export_strings.py).
-m = re.match(r'(\d+)\.(\d+)(?:-[A-Za-z]+\.(\d+))?$', version)
-if not m:
-    sys.exit("❌ 版本号格式不认识 / unrecognised version: %s" % version)
-major, minor, pre = int(m.group(1)), int(m.group(2)), m.group(3)
-code = major * 10000 + minor * 100 + (int(pre) if pre else 99)
+# versionCode 直接从源码里的 VERSION_CODE 取,**不再从版本字符串推导**。
+#
+# 从前是推导的(2.1-beta.3 → 20103)。版本编号换成 1.0.N 之后那条路会出人命:
+# 同一公式对 1.0.2 得 10002,低于所有已装 APK,Android 会以「降级」为由拒绝安装,
+# 用户只能卸载重装 —— 而卸载会清掉他所有的 shot 数据。而且那个正则也匹配不了
+# 1.0.2 这种格式,构建会直接失败。
+#
+# 现在它是一个独立的、只增不减的整数(见 print_the_shot_server.py 的 VERSION_CODE)。
+# 顺带一提:这一行仍然放在**构建时注入**而不是写进生成的 build.gradle,因为
+# android/android/ 是生成工程、不入库。
+#
+# versionCode comes straight from VERSION_CODE in the source, **no longer derived from
+# the version string**.
+#
+# It used to be derived (2.1-beta.3 → 20103). After the renumbering to 1.0.N that path
+# is dangerous: the same formula gives 1.0.2 → 10002, lower than every installed APK,
+# so Android refuses the install as a downgrade and the user must uninstall — which
+# wipes all their shot data. That regex also cannot match a plain 1.0.2, so the build
+# would simply fail.
+#
+# It is now an independent integer that only ever goes up (see VERSION_CODE in
+# print_the_shot_server.py). It is still injected at build time rather than hard-coded
+# into build.gradle because android/android/ is a generated, uncommitted project.
+code = None
+for line in open(os.path.join(root, "print_the_shot_server.py"), encoding="utf-8"):
+    m = re.match(r'VERSION_CODE\s*=\s*(\d+)', line.strip())
+    if m:
+        code = int(m.group(1))
+        break
+if not code:
+    sys.exit("❌ 读不到 VERSION_CODE / could not read VERSION_CODE")
 
 src = re.sub(r'versionCode\s+\d+', 'versionCode %d' % code, src)
 src = re.sub(r'versionName\s+"[^"]*"', 'versionName "%s"' % version, src)

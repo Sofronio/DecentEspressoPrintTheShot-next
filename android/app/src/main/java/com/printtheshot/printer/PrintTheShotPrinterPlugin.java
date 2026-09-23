@@ -1,6 +1,8 @@
 package com.printtheshot.printer;
 
 import android.content.Context;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -43,6 +45,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *   await PrintTheShotPrinter.disconnect();                    // {success}
  *   await PrintTheShotPrinter.startForegroundService();        // {success, running}
  *   await PrintTheShotPrinter.stopForegroundService();         // {success, running}
+ *   await PrintTheShotPrinter.savePlugin({ name });            // {success, path, message}
+ *   await PrintTheShotPrinter.exportBackup();                  // {success, path, bytes, message}
+ *   await PrintTheShotPrinter.importBackup();                  // {success, imported, message}
  * </pre>
  *
  * 关于 printRaw 的 data / on printRaw's data:
@@ -74,6 +79,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 @CapacitorPlugin(
         name = "PrintTheShotPrinter",
+        // 必须在这里登记,否则 Bridge.onActivityResult 找不到该把文件选择的结果派给
+        // 谁:它按 requestCodes 反查插件,查不到就转给 Cordova 那条路,结果永远回不来。
+        // 注解值必须是编译期常量,所以下面那个字段也得是 static final。
+        //
+        // This registration is required: Bridge.onActivityResult looks the plugin up by
+        // request code and, finding nothing, falls through to the Cordova path — so the
+        // picked file would never come back. Annotation values must be compile-time
+        // constants, hence the static final field below.
+        requestCodes = {PrintTheShotPrinterPlugin.REQ_IMPORT_BACKUP},
         permissions = {
                 // 这里刻意用字符串字面量而不是 Manifest.permission.* 常量:
                 // BLUETOOTH_CONNECT / POST_NOTIFICATIONS 要 compileSdk 31/33 才存在,
@@ -96,6 +110,12 @@ public class PrintTheShotPrinterPlugin extends Plugin {
 
     /** 日志标签 / log tag. */
     private static final String TAG = BluetoothPrinter.TAG;
+
+    /** 选备份文件的 request code / request code for picking a backup file. */
+    static final int REQ_IMPORT_BACKUP = 0x9B01;
+
+    /** 平板自己的服务端 / this tablet's own server. */
+    private static final String SELF_BASE = "http://localhost:8000";
 
     /** 权限别名:蓝牙连接 / permission alias: Bluetooth connect. */
     static final String ALIAS_BLUETOOTH_CONNECT = "bluetoothConnect";
@@ -424,7 +444,7 @@ public class PrintTheShotPrinterPlugin extends Plugin {
             while ((n = in.read(chunk)) > 0) buf.write(chunk, 0, n);
             byte[] data = buf.toByteArray();
 
-            String path = writeToDownloads(outName, data);
+            String path = writeToDownloads(outName, data, "text/plain");
 
             JSObject ret = new JSObject();
             ret.put("success", true);
@@ -449,11 +469,11 @@ public class PrintTheShotPrinterPlugin extends Plugin {
      * fails on newer systems. Older ones have no MediaStore.Downloads, so they fall back
      * to a plain write, which needs WRITE_EXTERNAL_STORAGE.
      */
-    private String writeToDownloads(String outName, byte[] data) throws Exception {
+    private String writeToDownloads(String outName, byte[] data, String mime) throws Exception {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             android.content.ContentValues values = new android.content.ContentValues();
             values.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, outName);
-            values.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain");
+            values.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime);
             values.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
                     android.os.Environment.DIRECTORY_DOWNLOADS);
 
@@ -478,6 +498,209 @@ public class PrintTheShotPrinterPlugin extends Plugin {
             fos.write(data);
         }
         return out.getAbsolutePath();
+    }
+
+    // ------------------------------------------------------------------
+    // 备份:导出 / 导入 — backups: export / import
+    // ------------------------------------------------------------------
+
+    /**
+     * 把本机服务端生成的备份包写进设备「下载」目录 /
+     * write the backup archive produced by this device's server into Downloads.
+     *
+     * 为什么要绕这一圈:包由**本机服务端**生成(只有它知道 shots_data 在哪),但
+     * 落盘必须走原生 —— WebView 不会保存文件,而把 URL 交给系统浏览器会因本 App
+     * 退到后台被冻结而拿到空白页(见 savePlugin 那段)。
+     *
+     * 这一圈并不自相矛盾:请求由原生自己发、自己收,全程在前台,不存在「提供文件的
+     * 那一端被冻住」的问题。真正绕开的只有 WebView 存不了文件这一条。
+     *
+     * Why the round trip: the archive is produced by **this device's own server** (only
+     * it knows where shots_data lives), but saving it must go native — a WebView does not
+     * save files, and handing the URL to the system browser gets a blank page because
+     * this app is frozen in the background while it is the one serving the file (see the
+     * savePlugin comment).
+     *
+     * The round trip is not self-defeating: the native side issues the request and reads
+     * the response itself, entirely in the foreground, so nothing that provides the file
+     * is ever frozen. The only thing being worked around is a WebView's inability to save
+     * a file.
+     *
+     * @return `{success: boolean, path: string, bytes: number, message: string}`
+     */
+    @PluginMethod
+    public void exportBackup(PluginCall call) {
+        // 网络 I/O 不能在主线程做,而且包多大事先不知道,所以另起一个线程。
+        // Network I/O cannot run on the main thread and the size is not known up front,
+        // so this goes on its own thread.
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    java.net.HttpURLConnection conn = (java.net.HttpURLConnection)
+                            new java.net.URL(SELF_BASE + "/api/backup/export").openConnection();
+                    conn.setConnectTimeout(10000);
+                    conn.setReadTimeout(60000);
+                    int code = conn.getResponseCode();
+                    if (code != 200) {
+                        call.reject("服务端返回 " + code + " / server returned " + code);
+                        return;
+                    }
+                    java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+                    try (java.io.InputStream in = conn.getInputStream()) {
+                        byte[] chunk = new byte[8192];
+                        int n;
+                        while ((n = in.read(chunk)) > 0) buf.write(chunk, 0, n);
+                    }
+                    byte[] data = buf.toByteArray();
+
+                    String ts = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+                            .format(new java.util.Date());
+                    String outName = "printtheshot_backup_" + ts + ".zip";
+                    String path = writeToDownloads(outName, data, "application/zip");
+
+                    JSObject ret = new JSObject();
+                    ret.put("success", true);
+                    ret.put("path", path);
+                    ret.put("bytes", data.length);
+                    ret.put("message", "已保存到「下载」/ saved to Downloads: " + outName);
+                    call.resolve(ret);
+                } catch (Exception e) {
+                    Log.w(TAG, "导出备份失败 / backup export failed: " + e.getMessage());
+                    call.reject("导出失败 / export failed: " + e.getMessage());
+                }
+            }
+        }).start();
+    }
+
+    /**
+     * 弹系统文件选择器,把选中的备份包交给本机服务端导入 /
+     * show the system file picker and hand the chosen archive to the local server.
+     *
+     * 选择器由原生弹,而不是用 WebView 里的 `<input type=file>`:那里拿到的是一个
+     * content:// 影子路径,要读原始字节得绕好几道,还得先把文件复制进 WebView 的
+     * 沙箱;原生拿到的就是同一条 content://,直接 openInputStream 就行。
+     *
+     * The picker is native rather than a WebView `<input type=file>`: there you get a
+     * content:// shadow path that takes several detours to read raw bytes from, plus a
+     * copy into the WebView's sandbox; natively it is the same URI and openInputStream
+     * works directly.
+     *
+     * @return `{success: boolean, imported: number, cancelled?: boolean, message: string}`
+     */
+    @PluginMethod
+    public void importBackup(PluginCall call) {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        // 放宽到 */* 再自己校验:有些机型/文件管理器对 application/zip 过滤得很严,
+        // 而备份包常被识别成 octet-stream,收窄了反而会让用户在自己的文件里找不到它。
+        // 选错了会在导入时报错,那也比「列表里根本没有这个文件」好。
+        //
+        // Widened to */* with validation of our own: some devices and file managers
+        // filter application/zip aggressively and a backup archive is often typed as
+        // octet-stream, so narrowing it hides the user's own file from them. A wrong
+        // pick fails loudly at import time, which beats the file not being listed at all.
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES,
+                new String[]{"application/zip", "application/octet-stream"});
+        getBridge().startActivityForPluginWithResult(call, intent, REQ_IMPORT_BACKUP);
+    }
+
+    /**
+     * 文件选择器回来了 / the file picker came back.
+     *
+     * `startActivityForPluginWithResult` 把这次的 call 存成「最后一次调用」,所以这里
+     * 用 getSavedCall() 取回来 —— 这两个 API 都是 Capacitor 标了 deprecated 的,但
+     * 也正是它提供的「等一个 Activity 结果」的机制,没有替代品。
+     *
+     * `startActivityForPluginWithResult` stashes the call as the last one, so it is
+     * retrieved here with getSavedCall(). Both APIs are deprecated in Capacitor, but they
+     * are the mechanism it provides for awaiting an Activity result, and there is no
+     * replacement.
+     */
+    @Override
+    protected void handleOnActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode != REQ_IMPORT_BACKUP) {
+            super.handleOnActivityResult(requestCode, resultCode, data);
+            return;
+        }
+        PluginCall call = getSavedCall();
+        if (call == null) {
+            Log.w(TAG, "导入结果回来了,但 call 已经不在了 / import result arrived with no call");
+            return;
+        }
+        if (resultCode != android.app.Activity.RESULT_OK || data == null || data.getData() == null) {
+            // 用户自己取消的。这不是错误,reject 会在界面上弹一个 ❌。
+            // The user cancelled. That is not an error, and rejecting would pop a ❌.
+            JSObject ret = new JSObject();
+            ret.put("success", false);
+            ret.put("cancelled", true);
+            ret.put("message", "已取消 / cancelled");
+            call.resolve(ret);
+            return;
+        }
+
+        final Uri uri = data.getData();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    byte[] body;
+                    try (java.io.InputStream in =
+                                 getContext().getContentResolver().openInputStream(uri)) {
+                        if (in == null) {
+                            throw new java.io.IOException("打不开这个文件 / cannot open the file");
+                        }
+                        java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+                        byte[] chunk = new byte[8192];
+                        int n;
+                        while ((n = in.read(chunk)) > 0) buf.write(chunk, 0, n);
+                        body = buf.toByteArray();
+                    }
+
+                    // 原始字节直接 POST 给本机服务端,不做表单编码 —— content-type
+                    // 不是 multipart 时服务端就把 body 本身当 zip 收。
+                    //
+                    // The raw bytes go straight to the local server with no form encoding:
+                    // when the content-type is not multipart the server treats the body
+                    // itself as the zip.
+                    java.net.HttpURLConnection conn = (java.net.HttpURLConnection)
+                            new java.net.URL(SELF_BASE + "/api/backup/import").openConnection();
+                    conn.setRequestMethod("POST");
+                    conn.setDoOutput(true);
+                    conn.setConnectTimeout(10000);
+                    conn.setReadTimeout(120000);
+                    conn.setRequestProperty("Content-Type", "application/zip");
+                    conn.setFixedLengthStreamingMode(body.length);
+                    try (java.io.OutputStream out = conn.getOutputStream()) {
+                        out.write(body);
+                    }
+
+                    int code = conn.getResponseCode();
+                    java.io.InputStream src = (code >= 200 && code < 300)
+                            ? conn.getInputStream() : conn.getErrorStream();
+                    java.io.ByteArrayOutputStream rbuf = new java.io.ByteArrayOutputStream();
+                    if (src != null) {
+                        try (java.io.InputStream in = src) {
+                            byte[] chunk = new byte[8192];
+                            int n;
+                            while ((n = in.read(chunk)) > 0) rbuf.write(chunk, 0, n);
+                        }
+                    }
+                    JSONObject res = new JSONObject(new String(rbuf.toByteArray(),
+                            java.nio.charset.StandardCharsets.UTF_8));
+
+                    JSObject ret = new JSObject();
+                    ret.put("success", res.optBoolean("success", false));
+                    ret.put("imported", res.optInt("imported", 0));
+                    ret.put("message", res.optString("message", ""));
+                    call.resolve(ret);
+                } catch (Exception e) {
+                    Log.w(TAG, "导入备份失败 / backup import failed: " + e.getMessage());
+                    call.reject("导入失败 / import failed: " + e.getMessage());
+                }
+            }
+        }).start();
     }
 
     // ------------------------------------------------------------------

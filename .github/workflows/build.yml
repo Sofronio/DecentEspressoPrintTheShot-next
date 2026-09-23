@@ -251,3 +251,27 @@ jobs:
           # this project's bilingual docs. The body always comes from
           # docs/RELEASE_NOTES.md, which is updated before tagging.
           body_path: docs/RELEASE_NOTES.md
+
+          # 带后缀的 tag(本项目的约定是 `-beta.N`)一律发成 **pre-release**。
+          #
+          # 这一行不是装饰,是「稳定版频道」能否成立的前提:检查更新靠 GitHub 的
+          # `prerelease` 标志区分正式版和 beta(稳定版频道只挑正式版)。标错了,
+          # 一个 beta 就会被当成正式版推给所有用稳定版的人。
+          #
+          # 从前没有这一行,而这个 action 默认就是 false —— 所以 2.1-beta.1/2/3 三个
+          # release 建出来全是正式版,是事后手动改的。判据用「tag 里有没有连字符」而
+          # 不是死写 `-beta.`:将来加 `-rc.1` 之类也不会悄悄漏掉。
+          #
+          # Tagged with a suffix — `-beta.N` by this project's convention — always goes
+          # out as a **pre-release**.
+          #
+          # This line is not decoration; it is what makes the stable channel possible.
+          # Update checking tells finals from betas by GitHub's `prerelease` flag (the
+          # stable channel only considers finals), so getting it wrong pushes a beta at
+          # everyone running a stable build.
+          #
+          # It used to be absent and the action defaults to false, so 2.1-beta.1/2/3 were
+          # all created as full releases and had to be corrected by hand afterwards. The
+          # test is "does the tag contain a hyphen" rather than a literal `-beta.`, so
+          # adding something like `-rc.1` later cannot silently slip through.
+          prerelease: ${{ contains(github.ref_name, '-') }}

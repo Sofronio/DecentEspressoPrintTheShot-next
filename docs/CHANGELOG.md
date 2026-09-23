@@ -2,7 +2,71 @@
 
 [中文](CHANGELOG_zh.md) | English
 
-## 2.1-beta.3
+## 1.0.0-beta.4
+
+The release that makes your shot data yours to keep — export it, restore it — and makes
+"check for updates" actually check. It also renumbers the version.
+
+**If you are on 2.1-beta.anything: update by hand, this once.** The scheme changed to
+`1.0.0-beta.N`, so your 2.1-beta.3 is now 1.0.0-beta.3. A build running the old numbering
+cannot see the new one: it compares 2.1 against 1.0, concludes it is ahead, and reports
+"already up to date" forever. One manual update fixes this permanently — the new build
+understands both numberings.
+
+### Changed
+
+- **Backups can now be exported, and put back.** "Backup" used to run once,
+  automatically, inside the service-update flow: invisible, unreachable, and useful in
+  exactly one scenario. What actually loses data is **uninstalling** (which wipes the
+  app's private directory) and **switching devices** — and both happen outside the app,
+  so it never got the chance to back itself up first. There is now a Backup & restore
+  card: export downloads a zip of every shot record, and import restores it. Importing
+  **overwrites records with the same filename** — it is a restore, not a merge — and it
+  neither prints nor queues anything, because restoring history is not new data.
+- **On Android, export and import go through native code.** A WebView cannot save a
+  file, and handing the URL to the system browser is self-defeating: the browser takes
+  the foreground, this app goes to the background, and the file has to come from this
+  app's own server — so the side providing it is frozen exactly when it is asked. Export
+  now writes straight into Downloads through the native plugin; import opens the system
+  file picker and posts the bytes to the local server itself.
+- **"Check for updates" now really checks, on every platform.** Android used to answer
+  "this build updates by installing a new APK — online update is not available". True,
+  but it told the user nothing they wanted to know. The tablet now queries GitHub for the
+  latest release and compares it with the version it is running.
+- **Two channels: stable and beta.** Checking stable only considers final releases;
+  checking beta includes pre-releases and takes whichever has the higher version. Two
+  buttons rather than one auto-detecting one, so the choice is the user's.
+- **Builds that cannot update in place now say where to get the new version.** The
+  source-mode desktop updates itself; the packaged desktop and the APK open that
+  release's page. `/api/status` and `/api/update/check` return a single word—
+  `update_via`, one of `self`, `installer`, `apk`—and the UI follows it. All three share
+  one code path.
+- **The version scheme is `1.0.0-beta.N`** (it was `2.1-beta.N`), and the old releases
+  were renamed on GitHub to match. The prerelease segment is what orders them: the final
+  `1.0.0` sorts after every beta of itself.
+- **`VERSION_CODE` is no longer derived from the version.** It used to be: `2.1-beta.3`
+  produced 20103. Under the new numbering that formula yields a value **lower than every
+  installed APK**, so Android would refuse the install as a downgrade and the user would
+  have to uninstall — which is exactly what wipes their shot data. It is now an
+  independent number that only ever goes up.
+
+### Fixed
+
+- **Importing a file that is not a backup reported success.** Feeding the Android server
+  a non-zip returned `success: true, imported: 0`. Java's `ZipInputStream` does not throw
+  on garbage — it simply yields no entries, which is indistinguishable from an empty
+  archive. The archive is now opened as a whole, so "this is not a backup" is an error,
+  and an archive carrying an illegal entry path is refused with a message that says so
+  rather than claiming it is not a zip.
+- **The test runner had been reporting a false green.** `tests/run_all.sh` tested the
+  exit code of `tail` at the end of a pipe rather than the suite's own, so four of its
+  five suites printed "✅ passed" however badly they failed. Two failures had been sitting
+  in the repository unnoticed. It now propagates the real exit code.
+- **Update checking no longer follows the `main` branch.** It compares against the latest
+  release instead, so "there is an update" always means "there is a released, tested
+  version" rather than "someone pushed a version bump".
+
+## 1.0.0-beta.3
 
 The release that made the Android app usable as a background print node, and then had to
 be reissued because the first attempt shipped broken.
@@ -95,10 +159,10 @@ printer configured. Every test run pushed a full chart at the default printer, a
 small-buffer thermal printer cannot absorb that. The tests now start the server with
 `PTS_PRINT_DRYRUN=1`. If you run these tests, you get that fix too.
 
-## 2.1-beta.2
+## 1.0.0-beta.2
 
 The release that made the Android app a server in its own right, reversing the client
-shape shipped in 2.1-beta.1. The tablet now receives shots straight from the DE1,
+shape shipped in 1.0.0-beta.1. The tablet now receives shots straight from the DE1,
 renders them, and prints over Bluetooth — with no computer anywhere in the path.
 
 ### Changed
@@ -197,7 +261,7 @@ renders them, and prints over Bluetooth — with no computer anywhere in the pat
 512-byte chunking with a 20 ms gap, and the whole ESC/POS byte layout remain untested
 against paper. The permission flows ran on Android 16 only, not on 12, 13 or 14.
 
-## 2.1-beta.1
+## 1.0.0-beta.1
 
 The release that moved drawing out of the server and made the printing layer
 pluggable. This is a structural change rather than a feature release: almost

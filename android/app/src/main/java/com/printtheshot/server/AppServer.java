@@ -14,10 +14,16 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.Arrays;
+import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 /**
  * 平板上跑的完整服务端 / the complete server running on the tablet
@@ -56,6 +62,55 @@ public class AppServer implements MiniHttpServer.Handler {
 
     private static final String TAG = "PTSAppServer";
     private static final String ASSET_ROOT = "public";
+
+    // 备份包的上限,和 Python 端保持一致。按**实际解压出的字节数**设限,而不是信
+    // zip 头里声明的 size —— 声明值可以撒谎(这正是 zip 炸弹的构造方式),读出来的
+    // 不会。
+    //
+    // Backup caps, matching the Python side. They apply to the bytes actually inflated,
+    // not to the size declared in the zip header: the header can lie (that is exactly how
+    // a zip bomb is built), the bytes cannot.
+    private static final int MAX_BACKUP_ENTRY = 8 * 1024 * 1024;
+    private static final long MAX_BACKUP_UNPACKED = 256L * 1024 * 1024;
+    private static final byte[] CRLFCRLF = {'\r', '\n', '\r', '\n'};
+
+    /**
+     * GitHub 的 release **列表**(不是 /releases/latest)。
+     *
+     * 为什么不用 latest:GitHub 对它的定义是「最新的**非 pre-release、非 draft**
+     * 的 release」,一个 pre-release 都没有时直接 **404**。而本项目在 beta 阶段
+     * 每个 release 都标 pre-release,用 latest 会让检查更新整个失效 —— 而且失效
+     * 得隐蔽:404 被走成「查询失败」,界面显示 ❌ 而不是「有新版」。
+     *
+     * 自己从列表挑最大还顺带把排序变成**按版本号**而不是按发布日期。
+     *
+     * The release **list**, not /releases/latest.
+     *
+     * Why not latest: GitHub defines it as "the most recent **non-prerelease,
+     * non-draft** release" and answers **404** when there is none. This project flags
+     * every release as a pre-release during the beta phase, so latest would break
+     * update checking — and quietly: a 404 becomes the "lookup failed" path, showing a
+     * ❌ instead of "there is a new version".
+     *
+     * Picking the maximum ourselves also makes the ordering **by version** rather than
+     * by publish date.
+     */
+    private static final String GITHUB_API_RELEASES =
+            "https://api.github.com/repos/Sofronio/DecentEspressoPrintTheShot-next/releases?per_page=30";
+
+    /**
+     * 查不到 latest 时的退路:整个 releases 列表页。
+     *
+     * 比没有链接强 —— 检查失败的时候用户至少还能自己去看一眼,而不是对着一句
+     * 「检查失败」束手无策。
+     *
+     * The fallback when the latest release cannot be fetched: the releases list page.
+     *
+     * Better than no link at all — when the check fails the user can still go look,
+     * instead of being left with a dead end.
+     */
+    private static final String GITHUB_RELEASES_PAGE =
+            "https://github.com/Sofronio/DecentEspressoPrintTheShot-next/releases";
 
     private final Context ctx;
     private final ShotStore store;
@@ -436,6 +491,56 @@ public class AppServer implements MiniHttpServer.Handler {
             case "/api/ai/balance":
                 return json("{\"success\":false,\"message\":\"Android 版不提供 AI 翻译\"}");
 
+            // ---- 更新 ----
+            // ---- updates ----
+            //
+            // 这两个路径从前落进下面的 default,回一句笼统的「此端未实现」。前端拿到
+            // 一个没有 update_available 的 JSON,把「缺席」读成 falsy,于是一路走到
+            // 绿色的「已是最新」—— 没检查,却给了结论。
+            //
+            // 现在 /check 是**真的去查**:平板自己不能在线更新(它是个 APK),但
+            // 「有没有新版」这件事照样问得出来 —— 查 GitHub 上最新的 release,和本机
+            // 版本比一下。查到有新版,前端把按钮变成「下载新 APK」并指向那个 release
+            // 页面。
+            //
+            // /api/update(POST,原地更新)在本版确实没有 —— 那条路要能把 APK 换成
+            // 自己,而 Android 不给应用这个权力。前端在这端也不再 POST 它,但仍然
+            // 如实回答,而不是假装成功。
+            //
+            // These two used to fall through to the default and answer with a generic
+            // "not implemented on this build". The front end got JSON with no
+            // update_available, read the absence as falsy, and landed on a green "up to
+            // date" — a verdict with no check behind it.
+            //
+            // /check now really checks. The tablet cannot update itself (it is an APK),
+            // but "is there a newer version" is still answerable — ask GitHub for the
+            // latest release and compare it with this build. When there is one, the front
+            // end turns the button into "download the APK" and points it at that release
+            // page.
+            //
+            // /api/update (POST, in-place) genuinely does not exist on this build: that
+            // path would have to replace the APK with itself, which Android does not let
+            // an app do. The front end no longer POSTs it here, but it still answers
+            // honestly rather than pretending to succeed.
+            case "/api/update/check":
+                return checkUpdate(req);
+
+            case "/api/update": {
+                JSONObject out = new JSONObject();
+                out.put("success", false);
+                out.put("unsupported", true);
+                out.put("message", "本版通过安装新 APK 更新,不支持在线更新 / "
+                        + "This build updates by installing a new APK; online update is not available");
+                return json(out.toString());
+            }
+
+            // ---- 备份与恢复 / backup & restore ----
+            case "/api/backup/export":
+                return exportBackup();
+
+            case "/api/backup/import":
+                return importBackup(req);
+
             default:
                 // 未知的 /api/* 返回 JSON 而不是 HTML,前端解 JSON 时才不会炸
                 // Unknown /api/* returns JSON, not HTML, so the front end's JSON parse
@@ -454,6 +559,14 @@ public class AppServer implements MiniHttpServer.Handler {
         out.put("status", "Running");
         out.put("version", version);
         out.put("platform", "android");
+        // 第二个更新按钮该干什么 —— 界面一加载就要知道(见 /api/update/check 的说明)。
+        // "apk":本版通过安装新 APK 更新,按钮是「下载新 APK」,打开 release 页面。
+        //
+        // What the second update button should do — the UI has to know this as soon as
+        // it loads (see the note on /api/update/check). "apk": this build updates by
+        // installing a new APK, so the button is "download the APK" and opens the
+        // release page.
+        out.put("update_via", "apk");
         out.put("shots_received", store.shotCount());
         // 前端的「启动时间 / 并发用户 / 最大用户」三格直接读这几个字段,不给就显示
         // undefined。桌面端有真实数据,这边给等价的:进程启动时刻、当前线程数、上限。
@@ -637,5 +750,521 @@ public class AppServer implements MiniHttpServer.Handler {
             while ((n = in.read(chunk)) > 0) buf.write(chunk, 0, n);
             return buf.toByteArray();
         }
+    }
+
+    /**
+     * 从 multipart 里取出第一个文件字段的**原始字节**,和 Python 端的
+     * _extract_multipart_bytes 是同一套做法。
+     *
+     * 和 extractMultipartJson 干的是同一件事,区别只在于全程不解码 —— 备份包是
+     * zip(二进制),先 new String(...) 会把内容毁掉。
+     *
+     * The minimal multipart parse, pulling the raw bytes of the first file field. Same
+     * job as extractMultipartJson except nothing is ever decoded — a backup is a zip
+     * (binary), and turning it into a String first would corrupt it.
+     */
+    private static byte[] extractMultipartBytes(byte[] body, String contentType) {
+        String boundary = MiniHttpServer.parseHeaderParams(contentType).get("boundary");
+        if (boundary == null) return null;
+        byte[] marker = ("--" + boundary).getBytes(StandardCharsets.ISO_8859_1);
+        int start = indexOf(body, marker, 0);
+        while (start >= 0) {
+            int headStart = start + marker.length;
+            int headEnd = indexOf(body, CRLFCRLF, headStart);
+            if (headEnd < 0) return null;
+            String head = new String(body, headStart, headEnd - headStart,
+                    StandardCharsets.ISO_8859_1);
+            if (head.contains("filename=")) {
+                int contentStart = headEnd + 4;
+                int next = indexOf(body, marker, contentStart);
+                int contentEnd = (next < 0) ? body.length : next;
+                // boundary 前那个 CRLF 是分隔符,不属于内容 —— 精确去掉两个字节。
+                // 不能像 JSON 版那样 trim/rstrip:二进制内容末尾真的以 CRLF 结束时
+                // 会被误删。
+                //
+                // The CRLF before the boundary separates it from the content and is not
+                // part of it — drop exactly those two bytes. Trimming, as the JSON
+                // version does, would eat real content that genuinely ends in CRLF.
+                if (contentEnd - contentStart >= 2
+                        && body[contentEnd - 2] == '\r' && body[contentEnd - 1] == '\n') {
+                    contentEnd -= 2;
+                }
+                return Arrays.copyOfRange(body, contentStart, contentEnd);
+            }
+            start = indexOf(body, marker, headStart);
+        }
+        return null;
+    }
+
+    /** byte[] 的 indexOf —— Java 没有现成的 / byte[] indexOf; Java has no built-in. */
+    private static int indexOf(byte[] haystack, byte[] needle, int from) {
+        outer:
+        for (int i = Math.max(0, from); i <= haystack.length - needle.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (haystack[i + j] != needle[j]) continue outer;
+            }
+            return i;
+        }
+        return -1;
+    }
+
+    // ---------------------------------------------------------------- 更新
+    // ---------------------------------------------------------------- updates
+
+    /**
+     * GET /api/update/check —— 查 GitHub 上最新的 release,和本机版本比。
+     *
+     * 数据源是 release **列表**,自己在里面挑最大的那个 —— 为什么不用
+     * /releases/latest 见 GITHUB_API_RELEASES 上面那段(一句话:它排除
+     * pre-release,而本项目 beta 阶段每个 release 都是 pre-release)。
+     *
+     * The source is the release **list**, picking the maximum ourselves — for why not
+     * /releases/latest see the note above GITHUB_API_RELEASES (in one line: it excludes
+     * pre-releases, and every release this project cuts during the beta phase is one).
+     *
+     * 返回 / returns:
+     *   `{success:true, local, remote, update_available, release_url, update_via}`
+     *   失败时 `{success:false, error, release_url}`,前端走 ❌ 分支 —— 查不到就
+     *   说查不到,绝不给一个绿色的结论。
+     *
+     *   On failure: `{success:false, error, release_url}` and the front end takes its
+     *   ❌ branch. A failed check says so; it never produces a green verdict.
+     */
+    private MiniHttpServer.Response checkUpdate(MiniHttpServer.Request req) throws Exception {
+        JSONObject out = new JSONObject();
+        java.net.HttpURLConnection conn = null;
+        String channel = req.param("channel", "auto");
+        if (!"stable".equals(channel) && !"beta".equals(channel)) channel = "auto";
+        try {
+            conn = (java.net.HttpURLConnection) new java.net.URL(GITHUB_API_RELEASES).openConnection();
+            conn.setConnectTimeout(12000);
+            conn.setReadTimeout(12000);
+            // GitHub API 不带 User-Agent 会直接 403,不是可选项
+            // The GitHub API returns 403 without a User-Agent; it is not optional.
+            conn.setRequestProperty("User-Agent", "PrintTheShotNext/" + version);
+            conn.setRequestProperty("Accept", "application/vnd.github+json");
+
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                Log.w(TAG, "查 release 列表失败 / release-list lookup failed: HTTP " + code);
+                out.put("success", false);
+                out.put("error", "GitHub 返回 " + code + " / GitHub returned " + code);
+                out.put("release_url", GITHUB_RELEASES_PAGE);
+                return json(out.toString());
+            }
+
+            // 自己在列表里挑最大的那个 —— 理由见 GITHUB_API_RELEASES 上面那段。
+            // 顺带一条:已经在用正式版的人不该被推去装 beta,所以本地是正式版时
+            // 只在正式版里挑;本地还在 beta 时两者一起挑(它得能升到正式版)。
+            //
+            // Pick the maximum ourselves — see the note above GITHUB_API_RELEASES.
+            // One extra rule: someone already on a final release should not be pushed
+            // onto a beta, so a final local version only considers final releases while
+            // a beta local version considers both (it has to be able to move up).
+            // 频道决定要不要把 beta 算进来:
+            //   stable —— 只在正式版里挑,用稳定版的人不该被推去装 beta
+            //   beta   —— 正式版和 beta 一起挑
+            //   auto   —— 频道跟着本机版本走(界面不传这个,是给直接调接口的默认)
+            //
+            // 三分支,不能压成一行。这里踩过:原本写成
+            // `"beta".equals(channel) || isPrerelease(version)`,那个 `||` 把 auto 的
+            // 规则漏给了所有频道 —— 于是在一台 beta 版机器上,显式的 channel=stable
+            // 被静默忽略,beta 又被算了进来,「稳定版频道」查出了 beta。实测于平板上。
+            //
+            // Three separate branches; do not collapse them. This was hit: it read
+            // `"beta".equals(channel) || isPrerelease(version)`, and that `||` leaked the
+            // auto rule into every channel — so on a beta build an explicit
+            // channel=stable was silently ignored and betas counted again, making the
+            // "stable" channel return a beta. Measured on the tablet.
+            //
+            // The channel decides whether betas count:
+            //   stable — finals only; someone on a stable build should not be pushed onto
+            //            a beta
+            //   beta   — finals and betas together
+            //   auto   — follow the local version (the UI never sends this; it is the
+            //            default for anyone calling the endpoint directly)
+            boolean wantPrerelease;
+            if ("beta".equals(channel)) {
+                wantPrerelease = true;
+            } else if ("stable".equals(channel)) {
+                wantPrerelease = false;
+            } else {
+                wantPrerelease = isPrerelease(version);
+            }
+
+            JSONArray releases = new JSONArray(readStream(conn.getInputStream()));
+            String tag = "", url = GITHUB_RELEASES_PAGE;
+            for (int i = 0; i < releases.length(); i++) {
+                JSONObject rel = releases.optJSONObject(i);
+                if (rel == null || rel.optBoolean("draft", false)) continue;
+                if (rel.optBoolean("prerelease", false) && !wantPrerelease) continue;
+                String t = rel.optString("tag_name", "");
+                if (t.isEmpty()) continue;
+                if (tag.isEmpty() || versionCompare(t, tag) > 0) {
+                    tag = t;
+                    url = rel.optString("html_url", GITHUB_RELEASES_PAGE);
+                }
+            }
+            // 频道为空不算错误 —— 说清楚它,而不是报一个「查不到」,更不是「已是最新」
+            // An empty channel is not an error: say so, rather than reporting a failed
+            // lookup — and certainly not "up to date".
+            if (tag.isEmpty()) {
+                out.put("success", true);
+                out.put("local", version);
+                out.put("remote", "");
+                out.put("channel", channel);
+                out.put("update_available", false);
+                out.put("release_url", GITHUB_RELEASES_PAGE);
+                out.put("update_via", "apk");
+                out.put("message", "这个频道还没有发布过版本 / Nothing released in this channel yet");
+                return json(out.toString());
+            }
+            boolean newer = versionCompare(tag, version) > 0;
+
+            // 日志里把两个版本和结论都写出来 —— 更新这件事出问题时,「它到底以为
+            // 自己是什么版本」永远是要问的第一个问题。
+            //
+            // Log both versions and the verdict. When updates misbehave, "what version
+            // does it think it is" is always the first question.
+            Log.i(TAG, "检查更新 / update check: 本机 " + version + " vs 远端 " + tag
+                    + " -> " + (newer ? "有新版 / newer" : "已是最新 / up to date"));
+
+            out.put("success", true);
+            out.put("local", version);
+            out.put("remote", tag);
+            out.put("channel", channel);
+            out.put("update_available", newer);
+            out.put("release_url", url);
+            out.put("update_via", "apk");
+            return json(out.toString());
+        } catch (Exception e) {
+            Log.w(TAG, "检查更新失败 / update check failed: " + e.getMessage());
+            out.put("success", false);
+            out.put("error", String.valueOf(e.getMessage()));
+            out.put("release_url", GITHUB_RELEASES_PAGE);
+            return MiniHttpServer.Response.json(500, out.toString());
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    /**
+     * 把版本号解析成可比较的数组,与 Python 端的 `_version_key` **逐条对应** ——
+     * 两端对「谁更新」必须给出同一个答案,否则同一台机器在桌面和 App 上会看到
+     * 相反的结论。改动其中一处时,另一处要跟着改,测试用例也是同一组。
+     *
+     *     '1.0.2'       -> (1, 0, 2, 1, 0)     正式版,哨兵 1
+     *     '1.0.3'       -> (1, 0, 3, 1, 0)     比上面大
+     *     'v2.1-beta.3' -> (1, 0, 2, 0, 3)     旧编号映射进新标尺,预发布哨兵 0
+     *
+     * Parses a version into a comparable array, mirroring the Python `_version_key`
+     * **item for item**: the two must agree on "which is newer", or the same machine
+     * would see opposite answers on the desktop and in the app. Change one, change the
+     * other; the test cases are the same list.
+     */
+    private static int[] versionKey(String v) {
+        String s = v == null ? "" : v.trim();
+        // release tag 带 v 前缀(v1.0.3),而下面的正则从头匹配 —— 不剥掉的话解析
+        // 失败、归到全零,远端就永远显得比本地旧,界面永远说「已是最新」。
+        //
+        // Release tags carry a leading v (v1.0.3) and the pattern below anchors at the
+        // start: without stripping it the parse fails and lands on all zeros, making
+        // the remote look older than anything local — "up to date" forever.
+        while (s.startsWith("v") || s.startsWith("V")) s = s.substring(1);
+
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("^(\\d+)\\.(\\d+)(?:\\.(\\d+))?").matcher(s);
+        if (!m.find()) return new int[]{0, 0, 0, 0, 0};
+        int major = Integer.parseInt(m.group(1));
+        int minor = Integer.parseInt(m.group(2));
+        int patch = m.group(3) != null ? Integer.parseInt(m.group(3)) : 0;
+
+        java.util.regex.Matcher pre = java.util.regex.Pattern
+                .compile("(alpha|beta|rc|next|pre)[.\\-]?(\\d+)",
+                        java.util.regex.Pattern.CASE_INSENSITIVE).matcher(s);
+        if (pre.find()) {
+            int n = Integer.parseInt(pre.group(2));
+            // 旧编号时代(2.1-beta.N)映射成 1.0.0-beta.N —— 也就是那些 release
+            // 改名之后的名字,一一对应。
+            //
+            // 不映射的话,还装着 2.1-beta.3 的机器会拿 2.1 和 1.0 比,得出「我更新」,
+            // 从此收不到更新 —— 那正是「谎报已是最新」的同门错误。
+            //
+            // Versions from the old numbering (2.1-beta.N) map to 1.0.0-beta.N — exactly
+            // the names those releases were renamed to, one for one.
+            //
+            // Without it, a machine on 2.1-beta.3 compares 2.1 against 1.0, concludes it
+            // is ahead, and never sees another update — the same family of error as
+            // reporting "up to date" without checking.
+            if (major == 2) return new int[]{1, 0, 0, 0, n};
+            return new int[]{major, minor, patch, 0, n};
+        }
+        return new int[]{major, minor, patch, 1, 0};
+    }
+
+    /** 按 versionKey 比较两个版本 / compare two versions the way versionKey defines. */
+    private static int versionCompare(String a, String b) {
+        int[] x = versionKey(a), y = versionKey(b);
+        for (int i = 0; i < x.length; i++) {
+            if (x[i] != y[i]) return Integer.compare(x[i], y[i]);
+        }
+        return 0;
+    }
+
+    /** 是不是预发布版(哨兵位为 0)/ whether a version is a prerelease (sentinel 0). */
+    private static boolean isPrerelease(String v) {
+        return versionKey(v)[3] == 0;
+    }
+
+    /** 读一个流到字符串 / read a stream into a string. */
+    private static String readStream(InputStream in) throws Exception {
+        try (InputStream src = in) {
+            ByteArrayOutputStream buf = new ByteArrayOutputStream();
+            byte[] chunk = new byte[8192];
+            int n;
+            while ((n = src.read(chunk)) > 0) buf.write(chunk, 0, n);
+            return new String(buf.toByteArray(), StandardCharsets.UTF_8);
+        }
+    }
+
+    // ---------------------------------------------------------------- 备份
+    // ---------------------------------------------------------------- backup
+
+    /**
+     * GET /api/backup/export —— 把 shot 数据打成一个 zip 返回。
+     *
+     * 内容与桌面端 Python 的导出保持一致(平铺的 *.json,含 index.json),这样两边
+     * 的备份包可以互相导入。
+     *
+     * Contents match the desktop Python export (flat *.json entries, index.json
+     * included), so the archives are interchangeable between the two.
+     */
+    private MiniHttpServer.Response exportBackup() throws Exception {
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        int count = 0;
+        try (ZipOutputStream z = new ZipOutputStream(buf)) {
+            File[] files = store.getDir().listFiles();
+            if (files != null) {
+                Arrays.sort(files);
+                for (File f : files) {
+                    if (!f.isFile() || !f.getName().endsWith(".json")) continue;
+                    z.putNextEntry(new ZipEntry(f.getName()));
+                    z.write(readFile(f));
+                    z.closeEntry();
+                    count++;
+                }
+            }
+        }
+        byte[] payload = buf.toByteArray();
+        String ts = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
+
+        MiniHttpServer.Response r = MiniHttpServer.Response.bytes(200, "application/zip", payload);
+        r.extraHeaders.put("Content-Disposition",
+                "attachment; filename=\"printtheshot_backup_" + ts + ".zip\"");
+        // 备份纪律:打印实际打包的条数和字节数,而不是只说了一句「导出了」。
+        // Backup discipline: report the entries and bytes actually packed rather than
+        // just announcing that an export happened.
+        Log.i(TAG, "已导出备份 / backup exported: " + count + " 个文件,"
+                + payload.length + " 字节");
+        return r;
+    }
+
+    /**
+     * POST /api/backup/import —— 收下一个备份 zip,把里面的 shot 恢复回去。
+     *
+     * 语义是**恢复**,不是合并:同名文件按内容覆盖。这正是「导回」该有的样子 ——
+     * 用户拿着备份回来,期望的是回到导出时的样子,而不是新旧混在一起。
+     *
+     * 三条纪律与 Python 端一致:条目名一律取 basename(`../` 不该落盘)、跳过
+     * index.json(生成物,索引会自愈重建)、不触发打印也不入队(恢复历史不是新
+     * 数据,不该出纸)。
+     *
+     * Semantics are **restore**, not merge: a matching filename is overwritten. That is
+     * what "import my backup" should mean — the user expects to get back what they
+     * exported, not a blend of old and new.
+     *
+     * The three rules match the Python side: entry names are reduced to their basename (a
+     * `../` never reaches the disk), index.json is skipped (derived; the index rebuilds
+     * itself by scanning), and nothing is printed or queued (restoring history is not new
+     * data).
+     */
+    private MiniHttpServer.Response importBackup(MiniHttpServer.Request req) throws Exception {
+        JSONObject out = new JSONObject();
+        if (req.body.length == 0) {
+            out.put("success", false);
+            out.put("message", "空请求 / empty body");
+            return MiniHttpServer.Response.json(400, out.toString());
+        }
+
+        byte[] body = req.body;
+        String ctype = req.headers.get("content-type");
+        if (ctype != null && ctype.toLowerCase(Locale.US).contains("multipart/form-data")) {
+            byte[] extracted = extractMultipartBytes(body, ctype);
+            if (extracted != null) body = extracted;
+        }
+
+        int imported = 0, skipped = 0;
+        long unpacked = 0;
+        JSONArray skippedNames = new JSONArray();
+
+        // 先落在临时文件上再打开:ZipFile 只能从文件读,但它有两个 ZipInputStream
+        // 给不了的东西 ——
+        //
+        // 1. **明确回答「这是不是 zip」**。ZipInputStream 对垃圾输入不抛异常,只是一
+        //    个条目都读不出来 —— 那和「包是空的」长得一模一样,于是「这根本不是备份」
+        //    会被报成「成功恢复 0 条」。这正是我在这台设备上实测到的假成功。
+        //    ZipFile 的构造函数对非 zip 直接抛 ZipException。
+        // 2. **每个条目独立成败**。Android 的 zip 解析自带路径校验(条目名含 `../`
+        //    时抛「Invalid zip entry path」),而 ZipInputStream 是在 getNextEntry 里
+        //    抛的 —— 那时前面的条目已经写进去了,想只跳过那一个坏条目都做不到,只能
+        //    整包中止,于是「导了一半然后报失败」。按条目读就没有这个问题。
+        //
+        // A temp file first: ZipFile only reads from a file, and it offers two things
+        // ZipInputStream cannot.
+        //
+        // 1. **A definite "is this a zip" answer.** ZipInputStream does not throw on
+        //    garbage; it merely yields no entries, which is indistinguishable from an
+        //    empty archive — so "this is not a backup at all" got reported as
+        //    "successfully restored 0 records". That false success was measured on this
+        //    very device. ZipFile's constructor throws ZipException on a non-zip.
+        // 2. **Per-entry success and failure.** Android's zip parsing validates entry
+        //    paths itself (a `../` name throws "Invalid zip entry path"), and
+        //    ZipInputStream throws that from getNextEntry — by which point earlier
+        //    entries are already written, so skipping just the one bad entry is
+        //    impossible and the whole archive has to be abandoned, reporting a failure
+        //    for an import that half happened. Reading entry by entry avoids that.
+        File tmp = File.createTempFile("pts_backup", ".zip", ctx.getCacheDir());
+        try {
+            try (FileOutputStream fos = new FileOutputStream(tmp)) {
+                fos.write(body);
+            }
+            try (java.util.zip.ZipFile zf = new java.util.zip.ZipFile(tmp)) {
+                java.util.Enumeration<? extends ZipEntry> entries = zf.entries();
+                while (entries.hasMoreElements()) {
+                    ZipEntry e = entries.nextElement();
+                    if (e.isDirectory()) continue;
+                    String entry = e.getName().replace('\\', '/');
+
+                    // 带 ".." 的条目直接跳过,而不是安静地取个 basename 收下 —— 包里
+                    // 出现 `../` 只有两种可能:坏了,或者恶意。两种都不该被当作一条
+                    // 正常记录导进来,用户也该在「跳过」里看到它。
+                    //
+                    // Android 的 zip 解析往往更早一步自己抛错,那种情况由下面按条目的
+                    // catch 兜住;这一行保证两台服务端的行为一致。
+                    //
+                    // Entries containing ".." are skipped rather than quietly taken
+                    // under their basename: a `../` in an archive is either corrupt or
+                    // hostile, and neither should come in as a legitimate record. The
+                    // user should see it listed as skipped.
+                    //
+                    // Android's own zip parsing often throws first, and the per-entry
+                    // catch below absorbs that; this line keeps the two servers behaving
+                    // the same either way.
+                    if (Arrays.asList(entry.split("/")).contains("..")) {
+                        skipped++;
+                        skippedNames.put(e.getName());
+                        continue;
+                    }
+                    // 仍然只取 basename 落盘:最后一道关口,不指望上面那行。
+                    // Still write under the basename: the last gate before the disk, and
+                    // it does not rely on the check above.
+                    String name = new File(entry).getName();
+                    if (!name.endsWith(".json") || name.equals("index.json")) {
+                        skipped++;
+                        skippedNames.put(e.getName());
+                        continue;
+                    }
+
+                    try {
+                        ByteArrayOutputStream ebuf = new ByteArrayOutputStream();
+                        long size = 0;
+                        boolean tooBig = false;
+                        try (InputStream in = zf.getInputStream(e)) {
+                            byte[] chunk = new byte[8192];
+                            int n;
+                            while ((n = in.read(chunk)) > 0) {
+                                size += n;
+                                if (size > MAX_BACKUP_ENTRY
+                                        || unpacked + size > MAX_BACKUP_UNPACKED) {
+                                    tooBig = true;
+                                    break;
+                                }
+                                ebuf.write(chunk, 0, n);
+                            }
+                        }
+                        if (tooBig) {
+                            skipped++;
+                            skippedNames.put(e.getName());
+                            continue;
+                        }
+                        unpacked += size;
+                        byte[] raw = ebuf.toByteArray();
+
+                        // 先解析再落盘:存进一个坏文件只会让以后每次列表都出错。
+                        // Parse before writing: a malformed file would break every later
+                        // listing.
+                        new JSONObject(new String(raw, StandardCharsets.UTF_8));
+
+                        store.importFile(name, raw);
+                        imported++;
+                    } catch (Exception badEntry) {
+                        // 坏条目跳过而不是整体失败:一个坏文件不该让其余几百条白导。
+                        // Skip the bad entry rather than failing the whole import: one
+                        // malformed file should not cost the other few hundred.
+                        Log.w(TAG, "跳过一个坏条目 / skipping a bad entry: "
+                                + e.getName() + " — " + badEntry.getMessage());
+                        skipped++;
+                        skippedNames.put(e.getName());
+                    }
+                }
+            } catch (java.util.zip.ZipException refused) {
+                // 两种原因都会落到这里,必须分清 —— 否则消息本身在骗人:
+                //   a) 根本不是 zip;
+                //   b) 是 zip,但里面有非法路径条目,Android 的解析器直接拒绝整包。
+                //
+                // b 在 Python 端是「跳过那一条、其余照常导入」,Android 上做不到:平台
+                // 的解析器在**构造函数里**就抛了,整包原子拒绝。实测过 —— 好条目放在
+                // 前面也一样,一条都不会落盘,所以不存在「导了一半」的中间状态。
+                //
+                // Two causes land here and they have to be told apart, or the message
+                // itself lies: (a) it is not a zip at all, or (b) it is a zip carrying an
+                // illegal entry path, which Android's parser refuses wholesale.
+                //
+                // (b) is "skip that entry, import the rest" on the Python side, which
+                // Android cannot do: the platform parser throws in the **constructor**,
+                // rejecting the archive atomically. That was measured — good entries
+                // placed first land none the same, so there is no half-imported state.
+                String detail = String.valueOf(refused.getMessage());
+                boolean badEntryPath = detail.contains("Invalid zip entry path");
+                Log.w(TAG, "备份包被拒绝 / archive refused: " + detail);
+                out.put("success", false);
+                out.put("message", badEntryPath
+                        ? "备份包里有非法路径条目,已拒绝整个包 / the archive contains an "
+                          + "illegal entry path; the whole archive was refused"
+                        : "这不是有效的备份包(不是 zip 文件)/ "
+                          + "Not a valid backup archive (not a zip file)");
+                return MiniHttpServer.Response.json(400, out.toString());
+            }
+        } finally {
+            // 临时文件里是用户的整份数据,用完必须删,别留在缓存目录里。
+            // The temp file holds the user's entire dataset; it has to go, not sit in
+            // the cache directory.
+            if (!tmp.delete()) {
+                Log.w(TAG, "临时备份文件没删掉 / temp backup file not deleted: " + tmp);
+            }
+        }
+
+        // 备份纪律:报出实际落盘的条数,数不对就是没导成,别让它看起来像成了。
+        // Backup discipline: report what actually landed; wrong numbers mean it did not
+        // work, and nothing should suggest otherwise.
+        Log.i(TAG, "已导入备份 / backup imported: " + imported + " 条,跳过 " + skipped + " 条");
+
+        String msg = "已恢复 " + imported + " 条记录";
+        if (skipped > 0) msg += ",跳过 " + skipped + " 条";
+        out.put("success", true);
+        out.put("imported", imported);
+        out.put("skipped", skippedNames);
+        out.put("message", msg);
+        return json(out.toString());
     }
 }

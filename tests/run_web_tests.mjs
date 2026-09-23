@@ -70,10 +70,31 @@ class CDP {
       }
     });
   }
-  send(method, params = {}) {
+  /**
+   * 发一条 CDP 命令。**必须有超时** —— 没有的话,一旦 WebSocket 那头再也不回消息
+   * (实测遇到过:页面早就跑完了,结果也写进了 DOM,但 node 永远等不到回应),
+   * 这里返回的 Promise 就永远悬着,整个测试套件挂到天荒地老,而且不报任何错。
+   * 卡死比失败糟糕得多:失败会告诉你哪里不对,卡死只能靠人去 kill。
+   *
+   * Send a CDP command. The timeout is **not optional**: without it, if the other end
+   * of the WebSocket simply stops answering (measured: the page had long since
+   * finished and written its results into the DOM, while node waited forever), the
+   * returned promise never settles and the whole suite hangs indefinitely without
+   * reporting anything. A hang is far worse than a failure: a failure tells you what
+   * is wrong, a hang just leaves you killing processes.
+   */
+  send(method, params = {}, timeoutMs = 20000) {
     const id = ++this.id;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (this.pending.delete(id)) {
+          reject(new Error(`CDP ${method} 超时 / timed out after ${timeoutMs}ms`));
+        }
+      }, timeoutMs);
+      this.pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
@@ -144,6 +165,7 @@ async function main() {
 
   // 轮询等结果 / poll for the result
   let raw = null;
+  let cdpErrors = 0;
   for (let i = 0; i < 160; i++) {
     try {
       raw = await cdp.evaluate(`
@@ -152,7 +174,19 @@ async function main() {
           return el ? el.textContent : null;
         })()
       `);
-    } catch { /* page may still be navigating */ }
+      cdpErrors = 0;
+    } catch (e) {
+      // 页面还在导航时失败几次是正常的;但**连着**失败说明 CDP 这条通道已经不回话
+      // 了,继续轮询只会把「卡死」拖成很久的「卡死」。
+      //
+      // A few failures are normal while the page navigates, but consecutive ones mean
+      // the CDP channel has stopped answering; polling on only turns a hang into a long
+      // hang.
+      if (++cdpErrors >= 3) {
+        console.error('❌ CDP 连续失败 / CDP kept failing: ' + e.message);
+        break;
+      }
+    }
     if (raw) break;
     await sleep(250);
   }

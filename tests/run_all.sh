@@ -88,10 +88,24 @@ run_py() {
   hr
   echo "$label"
   hr
-  if python3 "$@" 2>&1 | grep -v "ResourceWarning\|_warnings.warn\|tracemalloc" | tail -4; then
+  python3 "$@" 2>&1 | grep -v "ResourceWarning\|_warnings.warn\|tracemalloc" | tail -4
+
+  # 退出码必须取 python 自己的 —— PIPESTATUS[0] 是管道第一段,也就是被测的那套。
+  # 这里原来把 if 直接架在整条管道上,判的是 **tail** 的退出码;而 tail 几乎总是
+  # 成功,于是下面四组测试不管怎么失败都会报「✅ 通过」。假绿的测试套件比没有
+  # 测试更糟:它让人以为自己验证过了,于是不再去看。
+  #
+  # The exit code has to come from python itself: PIPESTATUS[0] is the first stage of
+  # the pipe, which is the suite under test. This used to put the `if` directly on the
+  # pipeline, testing **tail**'s exit code — and tail almost always succeeds, so all
+  # four suites below reported "✅ passed" however badly they failed. A suite that
+  # reports a false green is worse than none: it makes people believe verification
+  # happened, and they stop looking.
+  local rc=${PIPESTATUS[0]}
+  if [ "$rc" -eq 0 ]; then
     echo "✅ $label — 通过 / OK"
   else
-    echo "❌ $label — 失败 / FAILED"
+    echo "❌ $label — 失败 / FAILED (exit $rc)"
     FAILED=1
   fi
 }

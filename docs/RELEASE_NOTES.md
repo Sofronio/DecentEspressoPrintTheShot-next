@@ -1,99 +1,70 @@
-# PrintTheShot Next v2.1-beta.3
+# PrintTheShot Next v1.0.0-beta.4
 
 ---
 
 # English
 
-The release that made the Android app usable as a background print node, and then had to
-be reissued because the first attempt shipped broken.
+The release that makes your shot data yours to keep — export it, restore it — and makes
+"check for updates" actually check. It also renumbers the version.
 
-**If you are reading this to decide whether to update: yes.** Two earlier builds under
-this same version number were withdrawn — one crashed on launch for anyone installing it
-fresh, and the other left the plugin download buttons doing nothing. This is the one that
-was tested end to end on real hardware.
+**If you are on 2.1-beta.anything: update by hand, this once.** The scheme changed to
+`1.0.0-beta.N`, so your 2.1-beta.3 is now 1.0.0-beta.3. A build running the old numbering
+cannot see the new one: it compares 2.1 against 1.0, concludes it is ahead, and reports
+"already up to date" forever. One manual update fixes this permanently — the new build
+understands both numberings.
 
 ### Changed
 
-- **The background service is no longer optional, and its type changed.** Nothing in the
-  app ever called `startForegroundService` — it lived in the plugin and in a doc comment
-  and nowhere else, so the service could never start and the app was frozen the moment it
-  went to the background. It now starts with the app, and the UI has a switch to turn it
-  off.
-- **`dataSync` → `connectedDevice`.** A Bluetooth printer is an external device, which is
-  what `connectedDevice` means; more to the point, from Android 15 `dataSync` carries a
-  6-hour-per-24-hour cap and is stopped by the system when it expires, while
-  `connectedDevice` is not among the types that limit applies to.
+- **Backups can now be exported, and put back.** "Backup" used to run once,
+  automatically, inside the service-update flow: invisible, unreachable, and useful in
+  exactly one scenario. What actually loses data is **uninstalling** (which wipes the
+  app's private directory) and **switching devices** — and both happen outside the app,
+  so it never got the chance to back itself up first. There is now a Backup & restore
+  card: export downloads a zip of every shot record, and import restores it. Importing
+  **overwrites records with the same filename** — it is a restore, not a merge — and it
+  neither prints nor queues anything, because restoring history is not new data.
+- **On Android, export and import go through native code.** A WebView cannot save a
+  file, and handing the URL to the system browser is self-defeating: the browser takes
+  the foreground, this app goes to the background, and the file has to come from this
+  app's own server — so the side providing it is frozen exactly when it is asked. Export
+  now writes straight into Downloads through the native plugin; import opens the system
+  file picker and posts the bytes to the local server itself.
+- **"Check for updates" now really checks, on every platform.** Android used to answer
+  "this build updates by installing a new APK — online update is not available". True,
+  but it told the user nothing they wanted to know. The tablet now queries GitHub for the
+  latest release and compares it with the version it is running.
+- **Two channels: stable and beta.** Checking stable only considers final releases;
+  checking beta includes pre-releases and takes whichever has the higher version. Two
+  buttons rather than one auto-detecting one, so the choice is the user's.
+- **Builds that cannot update in place now say where to get the new version.** The
+  source-mode desktop updates itself; the packaged desktop and the APK open that
+  release's page. `/api/status` and `/api/update/check` return a single word—
+  `update_via`, one of `self`, `installer`, `apk`—and the UI follows it. All three share
+  one code path.
+- **The version scheme is `1.0.0-beta.N`** (it was `2.1-beta.N`), and the old releases
+  were renamed on GitHub to match. The prerelease segment is what orders them: the final
+  `1.0.0` sorts after every beta of itself.
+- **`VERSION_CODE` is no longer derived from the version.** It used to be: `2.1-beta.3`
+  produced 20103. Under the new numbering that formula yields a value **lower than every
+  installed APK**, so Android would refuse the install as a downgrade and the user would
+  have to uninstall — which is exactly what wipes their shot data. It is now an
+  independent number that only ever goes up.
 
 ### Fixed
 
-- **Printing stopped in the background.** The pump was a `setInterval` inside the
-  WebView, and Chromium throttles a hidden page's timers to roughly once a minute. The
-  server now pokes the front end when a shot arrives — an `evaluateJavascript` call, not
-  a timer, so the throttling does not apply. Rendering still happens only in the front
-  end.
-- **The same receipt could print forever.** When a print succeeded but its
-  acknowledgement did not arrive, the server kept the job and the next pass claimed it
-  again; in practice the printer fed paper continuously. "Print each file once" is now
-  this end's own invariant, recorded *before* the ack so a lost ack cannot reprint it.
-- **The same shot printed several times.** De-duplication is now by **content**
-  (SHA-256, 30 second window) on both the Android and the desktop server, and the front
-  end re-fetches the queue per job so the copies the server drops disappear before they
-  print.
-- **The machine name printed as UNKNOWN while the UI showed de1xl.** The name is not in
-  the shot file — that is the uploaded JSON verbatim — it lives in the server's index. It
-  now travels on the queue job.
-- **Crash on launch after a fresh install.** `connectedDevice` requires not only its
-  install-time permission but also at least one **granted** Bluetooth permission, and
-  those are runtime permissions — so on the very first run nothing was granted and
-  `startForeground` threw every time. What made it fatal was that the service re-threw on
-  purpose; the exception escaped `onStartCommand` and took the app with it, before the
-  user had seen a screen or had any chance to grant anything. It now fails quietly, logs
-  what is missing, and the activity retries on resume.
-- **The plugin download buttons did nothing inside the APK.** A WebView does not save
-  files and Capacitor sets no download handler; and the Android server was not sending
-  `Content-Disposition`, which is why `.txt` was *displayed* rather than saved while
-  `.tcl` raised a download event anyway. Handing the URL to the system browser turned out
-  to be self-defeating — opening the browser backgrounds the app, and the file has to
-  come from the app's own server, which is frozen by then. The buttons now use no
-  network: the file ships inside the APK and the native side writes it into Downloads.
-- **Upgrading required uninstalling, which wiped your data.** Every build environment
-  signed with its own key, and each CI run generated a fresh one, so no build could
-  replace another (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). There is now one committed key
-  used by both variants. It is public and protects nothing; the build script says so, and
-  says what to do if this ever needs a real release signature.
-
-### Web UI
-
-- The GitHub button opens the file on GitHub rather than the releases page.
-- The plugin steps are no longer double-numbered, and now mention creating
-  `/de1plus/plugins/print_the_shot/` when it is missing — that folder does not exist on a
-  fresh install, so the old wording left the user stuck at step one.
-- Step four shows this machine's actual address, with the path beside it.
-
-### Verification
-
-- On a Samsung SM-X210 running Android 16, printing to a **real Bluetooth thermal
-  printer**: one upload produced exactly one receipt, the queue drained, and nothing
-  printed again afterwards.
-- A fresh install with no Bluetooth permission granted: zero crashes, and the keep-alive
-  comes up on its own once the permission is granted.
-- Both plugin buttons write 19,205 bytes — the size of `plugin/plugin.tcl` — into the
-  device's Downloads folder.
-- The debug and release APKs carry the same signing certificate.
-- The full test suite passes, including four de-duplication tests.
-
-**Not verified**: the shots printed during testing came from a file rather than from a
-real DE1, and nothing was printed through the desktop adapters — CUPS, the Windows
-spooler and the DE1's own upload path are still untested against paper.
-
-### One more thing
-
-During this release's development the printer fed paper continuously several times, and
-it was traced to **the test suite**: `tests/web_test.html` really POSTs `/api/print`, and
-its comment — "no printer is attached, that is fine" — only holds on a machine with no
-printer configured. Every test run pushed a full chart at the default printer, and a
-small-buffer thermal printer cannot absorb that. The tests now start the server with
-`PTS_PRINT_DRYRUN=1`. If you run these tests, you get that fix too.
+- **Importing a file that is not a backup reported success.** Feeding the Android server
+  a non-zip returned `success: true, imported: 0`. Java's `ZipInputStream` does not throw
+  on garbage — it simply yields no entries, which is indistinguishable from an empty
+  archive. The archive is now opened as a whole, so "this is not a backup" is an error,
+  and an archive carrying an illegal entry path is refused with a message that says so
+  rather than claiming it is not a zip.
+- **The test runner had been reporting a false green.** `tests/run_all.sh` tested the
+  exit code of `tail` at the end of a pipe rather than the suite's own, so four of its
+  five suites printed "✅ passed" however badly they failed. Two failures had been sitting
+  in the repository unnoticed. It now propagates the real exit code.
+- **Update checking no longer follows the `main` branch.** It compares against the latest
+  release instead, so "there is an update" always means "there is a released, tested
+  version" rather than "someone pushed a version bump".
 
 ## Downloads
 
@@ -126,74 +97,52 @@ or: try to open it once, then **System Settings → Privacy & Security → Open 
 
 # 中文
 
-让 Android 版真正能当后台打印节点用的一版 —— 第一版发出去是坏的,所以重发了一次。
+这一版让你的 shot 数据真正属于你自己 —— 能导出、也能导回来 —— 并且让「检查更新」真的
+去检查。版本编号也在这一版换掉了。
 
-**如果你正在看这段来决定要不要更新:要。** 这个版本号下先后发过两个构建,都已撤回:
-一个对全新安装的人启动即闪退,另一个的插件下载按钮点了没反应。这一版是在真机上
-从头到尾验证过的那个。
+**如果你在用 2.1-beta.any:这次请手动更新一次。** 编号方案换成了 `1.0.0-beta.N`,
+所以你的 2.1-beta.3 现在叫 1.0.0-beta.3。跑着旧编号的版本**看不到新编号**:它会拿 2.1
+和 1.0 比,得出「我更新」,于是永远显示「已是最新」。手动更新一次之后就不会再有问题
+—— 新版本认得两套编号。
 
 ### 变更
 
-- **后台常驻不再是可选项,服务类型也换了。** 此前全仓库没有任何地方调用
-  `startForegroundService` —— 它只出现在插件定义和文档注释里,所以这个服务**永远
-  启动不了**,App 一退到后台就被冻结。现在它随 App 自动启动,界面上给了关闭开关。
-- **`dataSync` → `connectedDevice`。** 蓝牙打印机就是「外部设备」,这正是
-  connectedDevice 的定义;更实际的是,Android 15 起 dataSync 有每日累计 6 小时的上限,
-  到点会被系统停掉,而 connectedDevice 不在该限制的适用类型里。
+- **备份现在能导出,也能导回来。** 原来的「备份」只在服务更新流程里自动跑一次:用户
+  看不到、也调不到,而它能救的场景只有一个。真正会丢数据的是**卸载重装**(会清掉
+  App 私有目录)和**换设备** —— 那两件事都发生在 App 之外,它根本没有机会先备份自己。
+  现在界面多了「备份与恢复」卡片:导出会把全部 shot 记录打成一个 zip 下载,导入则把它
+  恢复回来。导入是**按文件名覆盖**——是恢复,不是合并 —— 而且不会触发打印、也不入队,
+  因为恢复历史不是新数据。
+- **Android 上的导出与导入走原生。** WebView 存不了文件;把地址交给系统浏览器则自相
+  矛盾:浏览器一起来本 App 就退到后台,而文件要从本 App 自己的服务端取 —— 提供文件的
+  那一端在被取的那一刻正好被系统冻住。现在导出由原生插件直接写进「下载」目录,导入弹
+  系统文件选择器、由原生把字节发给本机服务端。
+- **「检查更新」现在真的检查,而且每个平台都是。** Android 端从前回的是「本版通过安装
+  新 APK 更新,不支持在线更新」—— 诚实,但没回答用户想知道的事。平板现在会去 GitHub
+  查最新的 release,和自己在跑的版本比。
+- **两个频道:稳定版与 Beta 版。** 查稳定版只在正式版里挑;查 Beta 版把预发布一起算上,
+  取版本号更高的那个。做成两个按钮而不是一个自动判断的,是为了让这个选择落在用户手里。
+- **不能原地更新的版本,现在会告诉你去哪儿拿新版。** 源码模式桌面端就地更新;打包版
+  桌面端和 APK 会打开那个 release 的页面。`/api/status` 和 `/api/update/check` 返回一个
+  词 —— `update_via`,取 `self` / `installer` / `apk` —— 界面照着它走,三种情况共用同
+  一条代码路径。
+- **版本编号换成 `1.0.0-beta.N`**(原来是 `2.1-beta.N`),旧的 release 也已在 GitHub 上
+  改名对齐。排序靠的是预发布段:正式版 `1.0.0` 排在它自己的所有 beta 之后。
+- **`VERSION_CODE` 不再由版本号推导。** 从前是推导的:`2.1-beta.3` 得到 20103。换编号
+  之后同一条公式算出来的值**低于所有已装 APK**,Android 会以「降级」为由拒绝安装,用户
+  只能卸载重装 —— 而卸载正是会清光他 shot 数据的那个动作。现在它是一个只增不减的独立数字。
 
 ### 修复
 
-- **退到后台就停止打印。** 队列泵是 WebView 里的 `setInterval`,而 WebView 一隐藏,
-  Chromium 会把它的定时器节流到大约一分钟一次。现在由服务端在 shot 到达时主动唤醒
-  前端 —— 走 `evaluateJavascript`,不是定时器,所以不受节流影响。
-- **同一张票会一直打下去。** 打印成功但回执没送到时,服务端不摘任务,下一轮又取到
-  它 —— 实测把打印机打到持续走纸。「同一个文件只打一次」改成这一端自己的不变量,
-  **先记上再回执**,所以丢回执不会导致重打。
-- **同一个 shot 打了好几张。** 两端都按**内容**去重(SHA-256,30 秒窗口),前端每打
-  一个任务就重新拉一次队列,让服务端摘掉的副本在打印之前就消失。
-- **票上印的是 UNKNOWN,而界面显示 de1xl。** 机器名不在 shot 文件里(那份是上传的
-  原始 JSON),它在服务端的索引里。现在跟着队列任务走。
-- **全新安装后启动即闪退。** `connectedDevice` 除了安装时权限,还要求**至少一个已
-  授予的**蓝牙权限,而那些是运行时权限 —— 第一次运行时一个都没有,`startForeground`
-  每次都抛异常。让它变成致命的是服务里那个**故意 rethrow**:异常从 `onStartCommand`
-  冒出去,把整个 App 带走了,而用户还没看到任何界面、也没机会授权。现在它安静地失败、
-  把缺什么写进日志,Activity 在 onResume 时重试。
-- **插件下载按钮在 APK 里点了没反应。** WebView 不会保存文件、Capacitor 也没设下载
-  处理;而 Android 服务端没发 `Content-Disposition` —— 所以 `.txt` 被**显示**出来而不是
-  保存,`.tcl` 反倒因为渲染不了触发了下载事件。把 URL 交给系统浏览器是**自相矛盾**的:
-  浏览器一起来 App 就退到后台,而文件要从 App 自己的服务端取,那时它已经被冻住了。
-  现在这两个按钮**完全不联网**:文件在 APK 里,由原生写进「下载」目录。
-- **升级必须先卸载,而卸载会清数据。** 每个构建环境用自己的密钥,CI 每次跑还现生成
-  一把新的,于是任何两个包都覆盖不了(`INSTALL_FAILED_UPDATE_INCOMPATIBLE`)。现在
-  仓库里放了一把固定密钥、两个变体共用。它是**公开的**、保护不了任何东西 —— 构建
-  脚本里写明了,也写了哪天需要真正的发布签名该怎么做。
-
-### Web 界面
-
-- GitHub 按钮打开 GitHub 上的文件,而不是 releases 页面。
-- 插件步骤不再重复编号,并且补上「目标文件夹不存在要先建」—— 全新安装时
-  `/de1plus/plugins/print_the_shot/` 并不存在,原来的说法会让人卡在第一步。
-- 第四步显示本机真实地址,路径写在同一条里。
-
-### 验证
-
-- Samsung SM-X210 / Android 16,**打到真实蓝牙热敏打印机**:一次上传只出一张票,
-  队列清空后不再打印。
-- 全新安装且未授予蓝牙权限:零崩溃;权限授予后常驻自己起来。
-- 两个插件按钮都把文件写进设备的「下载」目录,19,205 字节 —— 正是
-  `plugin/plugin.tcl` 的尺寸。
-- debug 与 release 两个包签的是同一张证书。
-- 全量测试通过,含四条去重用例。
-
-**未验证**:测试时打印的数据来自文件,不是真实 DE1 上传的;桌面端适配器(CUPS、
-Windows 打印后台)也没有打过纸。
-
-### 另外一件事
-
-这一版开发过程中,打印机几次疯狂吐纸,最后查到是**测试套件**干的:`tests/web_test.html`
-里那句「真的发一次 `/api/print`」,注释写着「没有打印机没关系」—— 而那个前提只在**没配
-打印机的机器**上成立。每跑一次测试都往默认打印机灌一张完整图表,缓冲小的热敏机顶不住。
-现在测试用 `PTS_PRINT_DRYRUN=1` 起服务端。跑这个项目测试的人,也一并拿到这个修复。
+- **导入一个根本不是备份的文件,会被报成成功。** 给 Android 服务端喂非 zip 数据,它回
+  `success: true, imported: 0`。Java 的 `ZipInputStream` 对垃圾数据不抛异常,只是一个
+  条目都读不出来 —— 那和「包是空的」长得一模一样。现在整包打开,所以「这不是备份」是
+  一个错误;而含非法条目路径的包会被拒绝,并且消息如实说明原因,而不是谎称「不是 zip」。
+- **测试运行器一直在报假绿。** `tests/run_all.sh` 的判定挂在管道末尾,测的是 `tail` 的
+  退出码而不是被测套件的,于是五组里有四组不管怎么失败都打印「✅ 通过」。仓库里因此躺着
+  两个没人发现的失败用例。现在它传递真实的退出码。
+- **「检查更新」不再跟着 `main` 分支走。** 改成对比最新的 release,于是「有更新」永远
+  等于「有一个已发布、测过的版本」,而不是「有人推了一次版本号」。
 
 ## 下载
 
