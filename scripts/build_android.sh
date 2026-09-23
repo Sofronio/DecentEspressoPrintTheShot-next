@@ -164,22 +164,54 @@ cp "$OURS/res/xml/"*.xml "$GEN/res/xml/" 2>/dev/null || true
 # 从来不跟 App 版本走,于是所有 APK 在系统看来都是同一个版本,「1.0」。
 # 这里每次构建按 print_the_shot_server.py 的 VERSION 改掉。
 #
-# 签名:release 变体在 Capacitor 模板里**没有签名配置**,assembleRelease 出来的
-# 是未签名包 —— 装不上(INSTALL_PARSE_FAILED_NO_CERTIFICATES),而报错信息不会
-# 告诉你「你没签名」。用调试密钥签它:sideload 测试够用,而且这个用途下的
-# release 包本来就只是 debug 包的一个更快的变体。
+# 签名:两个变体都用仓库里那把固定的密钥(android/signing/printtheshot.jks)。
+#
+# 为什么必须固定 —— 这条是踩出来的
+# --------------------------------
+# 默认行为下,每个构建环境用自己的调试密钥:本机用 ~/.android/debug.keystore,
+# CI 每次跑还在 runner 上现生成一把**新的**。后果是**任何两个包都互相覆盖不了**:
+#
+#     INSTALL_FAILED_UPDATE_INCOMPATIBLE:
+#     Existing package ... signatures do not match newer version
+#
+# 用户想从上一个版本升级,就只能先卸载 —— 而卸载会**清掉数据**(平板上的历史记录)。
+# 发布出去的包每版都这样,等于每版都在逼用户丢一次数据。
+#
+# 修法:仓库里放一把固定密钥,两个变体都签它,CI 和本机就都一致了。
+#
+# 取舍要说清楚:这把密钥是**公开的**(在仓库里),所以它保护不了任何东西 ——
+# 任何人都能签一个能覆盖安装的包。对这个用途是可接受的(debug 签名的 sideload
+# 应用,不走应用商店的信任模型),而「每版都得卸载重装」是实打实的伤害。
+# 哪天要上架或要真正的发布签名,应该把它换成 CI secret 里的一把真密钥。
+#
+# Signing: both variants are signed with the one key committed at
+# android/signing/printtheshot.jks.
+#
+# Why it has to be fixed — learned the hard way
+# --------------------------------------------
+# By default every build environment uses its own debug key: this machine's
+# ~/.android/debug.keystore, and a **freshly generated** one on each CI run. The result is
+# that no two builds can replace each other:
+#
+#     INSTALL_FAILED_UPDATE_INCOMPATIBLE:
+#     Existing package ... signatures do not match newer version
+#
+# Upgrading means uninstalling first, and uninstalling **wipes the data** (the shot
+# history on the tablet). Every published build did that to every user.
+#
+# The fix: one committed key, used by both variants, so CI and local agree.
+#
+# The trade-off, stated plainly: this key is **public** (it is in the repository), so it
+# protects nothing — anyone can sign an APK that installs over the app. That is
+# acceptable here (a debug-signed sideload app with no store trust model), whereas
+# "uninstall and lose your data on every release" is real harm. Should this ever go to a
+# store or need a genuine release signature, move it to a real key in a CI secret.
 #
 # ---- version and signing ----
 #
 # The generated project hard-codes versionCode 1 / versionName "1.0" — Capacitor's
 # template values, which never follow the app version, so every APK looks like the same
 # release called "1.0". Rewritten here from print_the_shot_server.py's VERSION.
-#
-# Signing: the release variant has **no signing config** in Capacitor's template, so
-# assembleRelease produces an unsigned package that cannot be installed
-# (INSTALL_PARSE_FAILED_NO_CERTIFICATES) — and the error never says "you did not sign
-# it". The debug key signs it: fine for sideloading, and a release build here is only a
-# faster variant of the debug one anyway.
 python3 - "$REPO_ROOT" "$VARIANT" <<'PY'
 import os, re, sys
 
@@ -223,9 +255,10 @@ src = re.sub(r'versionName\s+"[^"]*"', 'versionName "%s"' % version, src)
 # build release, then build debug, and the reference outlives the block, so Gradle
 # fails with unknown property 'debugInjected' — pointing at build.gradle rather than
 # at this script, which makes it look like the generated project broke.
-src = re.sub(r'\n\s*// >>> debug-signing \(injected by build_android.sh\).*?// <<< debug-signing\n',
+src = re.sub(r'\n\s*// >>> (?:debug|shared)-signing \(injected by build_android.sh\).*?// <<< (?:debug|shared)-signing\n',
              '\n', src, flags=re.S)
-src = re.sub(r'\n\s*signingConfig signingConfigs\.debugInjected', '', src)
+src = re.sub(r'\n\s*signingConfig signingConfigs\.(?:debugInjected|shared)', '', src)
+src = re.sub(r'\n\s*debug \{\n\s*\}\n', '\n', src)   # 上一轮可能补过一个空的 debug 块
 
 # 签名块总是注入(debug 不引用它就完全无害),只有 release 才加引用。
 # 这样两个变体来回构建时,文件状态始终自洽 —— 上一版按变体决定要不要注入块,
@@ -234,31 +267,50 @@ src = re.sub(r'\n\s*signingConfig signingConfigs\.debugInjected', '', src)
 # The block is always injected — harmless when nothing references it — and only the
 # release variant references it. That keeps the file consistent no matter which variant
 # was built last; deciding the block by variant is what left a dangling reference.
-keystore = os.path.expanduser("~/.android/debug.keystore").replace("\\", "/")
+keystore = os.path.join(root, "android", "signing", "printtheshot.jks").replace("\\", "/")
+if not os.path.exists(keystore):
+    sys.exit("❌ 找不到签名密钥 / signing keystore missing: %s" % keystore)
+
 block = """
-    // >>> debug-signing (injected by build_android.sh)
-    // 用调试密钥签 release 包:Capacitor 模板里没有签名配置,不签就装不上
-    // (INSTALL_PARSE_FAILED_NO_CERTIFICATES),而那个报错不会告诉你「你没签名」。
-    // Signs the release build with the debug key: Capacitor's template has no signing
-    // config, and an unsigned package cannot be installed at all.
+    // >>> shared-signing (injected by build_android.sh)
+    // 仓库里那把固定的密钥,两个变体共用 —— 目的是让本机与 CI 构建出来的包能互相
+    // 覆盖安装。用各自环境的调试密钥会出现 INSTALL_FAILED_UPDATE_INCOMPATIBLE,
+    // 用户升级只能先卸载,而卸载会清数据。详见 build_android.sh 里的说明。
+    //
+    // The one committed key, shared by both variants, so builds from this machine and
+    // from CI can replace each other. Using each environment's own debug key produces
+    // INSTALL_FAILED_UPDATE_INCOMPATIBLE, leaving uninstall (and data loss) as the only
+    // way to upgrade. See the note in build_android.sh.
     signingConfigs {
-        debugInjected {
+        shared {
             storeFile file("%s")
-            storePassword "android"
-            keyAlias "androiddebugkey"
-            keyPassword "android"
+            storePassword "printtheshot"
+            keyAlias "printtheshot"
+            keyPassword "printtheshot"
         }
     }
-    // <<< debug-signing
+    // <<< shared-signing
 """ % keystore
 src = src.replace("\n    buildTypes {", block + "\n    buildTypes {", 1)
 
-if variant == "release":
-    src = re.sub(r'(release\s*\{)', r'\1\n            signingConfig signingConfigs.debugInjected', src, count=1)
+# 两个变体都要签 —— 而 Capacitor 模板的 buildTypes 里**只有 release,没有 debug**,
+# 所以 debug 那个块得先补出来。不补的话,CI 发布的 debug 包(正是发布产物)仍然是
+# 每个环境各自的随机调试密钥,「覆盖安装」照样失败。
+#
+# Both variants — and note Capacitor's template has **only release under buildTypes, no
+# debug**, so that block has to be created. Without it the debug APK (which is what CI
+# publishes) keeps each environment's own random debug key and cannot be updated in place.
+if re.search(r'\n\s*debug\s*\{', src):
+    src = re.sub(r'(debug\s*\{)', r'\1\n            signingConfig signingConfigs.shared', src, count=1)
+else:
+    src = re.sub(r'(buildTypes\s*\{)',
+                 r'\1\n        debug {\n            signingConfig signingConfigs.shared\n        }',
+                 src, count=1)
+src = re.sub(r'(release\s*\{)', r'\1\n            signingConfig signingConfigs.shared', src, count=1)
 
 open(gradle, "w", encoding="utf-8").write(src)
 print("   versionName %s / versionCode %d%s" % (version, code,
-      " / 签名:调试密钥" if variant == "release" else ""))
+      " / 签名:仓库固定密钥" if variant == "release" else ""))
 PY
 
 # release 用的密钥不存在就生成一个(Android 工具链本来自动建,但 CI 或新机器上可能没有)
