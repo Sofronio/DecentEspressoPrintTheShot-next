@@ -41,6 +41,7 @@ really does run on Android (Termux, an embedded Python, and so on).
 
 from __future__ import annotations
 
+import os
 import platform
 import sys
 
@@ -84,6 +85,62 @@ class NullPrinter(BasePrinter):
         )
 
 
+class DryRunPrinter(BasePrinter):
+    """
+    试运行适配器:照常校验,然后什么都不做 / dry-run adapter: validate, then do nothing.
+
+    为什么需要它 —— 这条是踩出来的
+    -----------------------------
+    测试套件里有一句「真的发一次 /api/print」,注释写着「没有打印机没关系」。这个
+    前提只在**没配打印机的机器上**成立:在一台默认打印机就是热敏机的 Mac 上跑测试,
+    每一次都往那台机器灌一张完整图表(约 94 KB)。缓冲小的热敏机顶不住这种连续数据,
+    会错位、然后持续走纸 —— 实测把打印机打到必须断电才停。
+
+    测试需要的其实是一个**会成功、但不碰硬件**的适配器:接口形状照样验证(请求被
+    接受、位图通过校验),而纸一张都不出。
+
+    Why it exists — learned the hard way
+    -----------------------------------
+    The test suite contains a "really POST /api/print" step whose comment says "no
+    printer is attached, that is fine". That only holds on a machine with no printer
+    configured: run the tests on a Mac whose default printer is a thermal one and every
+    run pushes a full chart (about 94 KB) at it. A thermal printer with a small buffer
+    cannot absorb that, loses alignment and feeds paper continuously — in practice it had
+    to be power-cycled to stop.
+
+    What the tests need is an adapter that **succeeds without touching hardware**: the
+    interface shape is still exercised (the request is accepted, the bitmap is
+    validated), and not a sheet comes out.
+    """
+
+    platform_id = "dryrun"
+    display_name = "Dry run (no printing)"
+
+    def is_available(self):
+        return True
+
+    def list_printers(self):
+        return [{
+            "id": "dryrun",
+            "name": "Dry run",
+            "address": "dryrun",
+            "paired": True,
+            "default": True,
+        }]
+
+    def print_bitmap(self, bitmap, width, height, printer=None, **kwargs):
+        # 校验照做 ——「尺寸不符必须被拒」那条测试依赖它
+        # Validation still runs: the "a size mismatch must be rejected" test needs it
+        self.validate_bitmap(bitmap, width, height)
+        return self._ok("试运行,未实际打印 / dry run: nothing was sent to a printer",
+                        printer=printer or "dryrun", mode="dryrun")
+
+
+#: 设了这个环境变量就换成试运行适配器,纸一张都不出 /
+#: set this environment variable to swap in the dry-run adapter; nothing prints
+DRYRUN_ENV = "PTS_PRINT_DRYRUN"
+
+
 def platform_id():
     """把 sys.platform / platform.system() 归一成一个短标识 / normalise the platform to a short id."""
     if sys.platform.startswith("darwin"):
@@ -111,7 +168,16 @@ def load_printer(config=None):
     如何提示用户。
     Returns a BasePrinter instance. When nothing matches, a NullPrinter comes
     back and the caller decides how to tell the user.
+
+    环境变量 PTS_PRINT_DRYRUN 一旦设置,直接返回 DryRunPrinter —— 测试与被脚本
+    驱动的验证都靠它,免得「跑测试」等于「真的往默认打印机灌一张图」。见
+    DryRunPrinter 的说明。
+    With PTS_PRINT_DRYRUN set, a DryRunPrinter comes back instead — that is what keeps
+    "run the tests" from meaning "push a chart at the default printer". See DryRunPrinter.
     """
+    if os.environ.get(DRYRUN_ENV):
+        return DryRunPrinter(config)
+
     pid = platform_id()
     try:
         if pid == "mac":

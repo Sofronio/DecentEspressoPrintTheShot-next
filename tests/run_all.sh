@@ -128,8 +128,17 @@ elif ! command -v node >/dev/null 2>&1; then
   echo "⚠️  未找到 node,跳过浏览器测试 / no node found; skipping browser tests"
 else
   # 起一个服务端供测试页访问 / boot a server for the test pages to talk to
+  #
+  # PTS_PRINT_DRYRUN 是必须的:web_test.html 里那句「真的发一次 /api/print」在
+  # 配了打印机的机器上会**真的打印**。默认打印机若是热敏机,每跑一次测试就灌进去
+  # 一张完整图表(约 94 KB),足以把它打懵到持续走纸 —— 实测如此,最后靠断电才停。
+  #
+  # PTS_PRINT_DRYRUN is not optional: the "really POST /api/print" step in web_test.html
+  # **really prints** on a machine that has a printer. With a thermal printer as the
+  # default, every test run pushes a full chart (about 94 KB) at it — enough to leave it
+  # feeding continuously, which is exactly what happened; it took a power cycle to stop.
   PORT=8780
-  python3 print_the_shot_server.py --port "$PORT" >/tmp/pts_test_server.log 2>&1 &
+  PTS_PRINT_DRYRUN=1 python3 print_the_shot_server.py --port "$PORT" >/tmp/pts_test_server.log 2>&1 &
   SERVER_PID=$!
   trap 'kill $SERVER_PID 2>/dev/null' EXIT
 

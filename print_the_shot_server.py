@@ -49,7 +49,7 @@ import re
 from datetime import datetime
 from io import BytesIO
 
-VERSION = "2.1-beta.2"
+VERSION = "2.1-beta.3"
 
 def runtime_data_dir():
     """

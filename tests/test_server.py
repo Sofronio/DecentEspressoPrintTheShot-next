@@ -84,9 +84,19 @@ class ServerTest(unittest.TestCase):
         global PORT, BASE
         PORT = free_port(8791)
         BASE = "http://127.0.0.1:%d" % PORT
+        # 试运行:这些用例会调 /api/print,真跑就会往系统默认打印机上打。
+        # 默认打印机是热敏机时,每跑一次测试就是一张完整图表(约 94 KB)——
+        # 实测把打印机打到持续走纸、必须断电。见 printers.DryRunPrinter。
+        #
+        # Dry run: these tests call /api/print, and for real that means printing to the
+        # system default printer. With a thermal printer as the default, every run puts a
+        # full chart (about 94 KB) on it — which in practice left it feeding continuously
+        # until it was power-cycled. See printers.DryRunPrinter.
+        env = dict(os.environ, PTS_PRINT_DRYRUN="1")
         cls.proc = subprocess.Popen(
             [sys.executable, "print_the_shot_server.py", "--port", str(PORT)],
-            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            cwd=ROOT, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         # 等端口起来 / wait for the port
         for _ in range(150):

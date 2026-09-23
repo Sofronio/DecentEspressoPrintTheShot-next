@@ -2,6 +2,84 @@
 
 [中文](CHANGELOG_zh.md) | English
 
+## 2.1-beta.3
+
+The release that made the Android app usable as a background print node. Almost
+everything here comes from one fact: a tablet whose app is not in the foreground is
+**frozen by the system**, and the whole chain fails silently when it is.
+
+### Changed
+
+- **The background service is no longer optional, and its type changed.** Nothing in
+  the app ever called `startForegroundService` — it existed in the plugin and in a doc
+  comment and nowhere else, so the service could never start and the app was frozen the
+  moment it went to the background. It now starts with the app, and there is a switch in
+  the UI to turn it off.
+- **`dataSync` → `connectedDevice`.** A Bluetooth printer is an external device, which
+  is what `connectedDevice` means; more to the point, from Android 15 `dataSync` carries
+  a 6-hour-per-24-hour cap and is stopped by the system when it expires, while
+  `connectedDevice` is not among the types that limit applies to. Reading the job as
+  "moving data" had quietly ruled out the only shape this service makes sense in.
+
+### Fixed
+
+- **Printing stopped in the background, and the queue was never drained.** The pump was
+  a `setInterval` inside the WebView; once the WebView is hidden, Chromium throttles its
+  timers to roughly once a minute and sometimes not at all. The server now pokes the
+  front end when a shot arrives — an `evaluateJavascript` call, not a timer, so the
+  throttling does not apply. Rendering still happens only in the front end.
+- **The same receipt could print forever.** When a print succeeded but its
+  acknowledgement did not arrive, the server kept the job and the next pass claimed it
+  again. This was hit for real: the printer fed paper continuously. "Print each file
+  once" is now this end's own invariant — recorded *before* the ack, so a lost ack
+  cannot reprint it — with a per-pass cap as a backstop.
+- **The same shot printed several times.** The DE1's `after_flow_complete` can fire more
+  than once, and an upload that times out client-side still lands on the server, so the
+  retry stores a second copy. Every upload gets a fresh filename, so name-based
+  de-duplication caught none of it. De-duplication is now by **content** (SHA-256, 30
+  second window) on both the Android and the desktop server, and the front end re-fetches
+  the queue per job so the copies the server drops are dropped before they print.
+- **The machine name printed as UNKNOWN while the UI showed de1xl.** The name is not in
+  the shot file — that is the uploaded JSON verbatim — it lives in the server's index.
+  It now travels on the queue job, and the manual print path passes it from the card it
+  was already displaying.
+- **The plugin downloads 404'd on the tablet.** `npx cap copy` only moves `webDir`, and
+  `plugin/plugin.tcl` lives at the repository root, so it never entered the APK — while
+  the desktop packages, whose spec lists it, were fine. The build now bundles it under
+  both names (`plugin.tcl` and `plugin.tcl.txt`; Android often refuses `.tcl` over
+  Bluetooth and accepts `.txt`).
+- **The test suite printed to real hardware.** `tests/web_test.html` really POSTs
+  `/api/print`, and its comment — "no printer is attached, that is fine" — only holds on
+  a machine with no printer configured. With a thermal printer as the system default,
+  every test run pushed a full chart (about 94 KB) at it; a small-buffer thermal printer
+  cannot absorb that, loses alignment and feeds paper continuously, and the only way to
+  stop it was to cut the power. This is worth stating plainly: the runaway paper during
+  this release's development was the test suite, not the app. The tests now start the
+  server with `PTS_PRINT_DRYRUN=1`, which swaps in an adapter that validates the bitmap
+  and succeeds **without touching a printer**.
+
+### Web UI
+
+- The GitHub button opens the file on GitHub rather than the releases page — a button
+  that says "download" should not land you on a page you have to search.
+- The plugin steps are no longer double-numbered: the `<ol>` numbers them, and the
+  strings carried their own "1. 2. 3." on top.
+- Step four shows this machine's actual address instead of the words "this machine's
+  IP", and the address and the path are two steps, because they are two fields in the
+  plugin.
+
+### Verification
+
+- On a Samsung SM-X210 running Android 16, printing to a **real Bluetooth thermal
+  printer**: one upload produced exactly one receipt, the queue drained, and nothing
+  printed again afterwards.
+- The plugin downloads return 200 with byte-identical content to `plugin/plugin.tcl`.
+- The full test suite passes, including four new de-duplication tests.
+
+**Not verified**: the shots printed during testing came from a file rather than from a
+real DE1, and nothing was printed through the desktop adapters — so CUPS, the Windows
+spooler and the DE1's own upload path are still untested against paper.
+
 ## 2.1-beta.2
 
 The release that made the Android app a server in its own right, reversing the client
