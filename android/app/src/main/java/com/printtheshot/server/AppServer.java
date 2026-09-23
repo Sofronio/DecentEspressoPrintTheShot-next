@@ -128,6 +128,9 @@ public class AppServer implements MiniHttpServer.Handler {
         // ---- 上传 ----
         if (p.equals("/upload")) return handleUpload(req);
 
+        // ---- DE1 插件下载 ----
+        if (p.startsWith("/plugin/")) return servePlugin(p);
+
         // ---- JSON 下载 ----
         if (p.startsWith("/download/json/")) {
             File f = store.fileFor(p.substring("/download/json/".length()));
@@ -160,6 +163,53 @@ public class AppServer implements MiniHttpServer.Handler {
      * title patch), already verified on both the browser and APK paths. Doing it again
      * in Java would add a second place to drift.
      */
+    /**
+     * 提供 DE1 插件下载 / serve the DE1 plugin downloads.
+     *
+     * 为什么不能直接走 serveAsset(通用资源分发)
+     * ----------------------------------------
+     * 因为那样**没有 Content-Disposition**,而在这个场景里它是关键的一行:
+     *
+     *   - `.tcl` 在 WebView 里渲染不了,所以哪怕没有它也会触发下载事件;
+     *   - `.txt` **能**渲染 —— WebView 会把它当文本显示出来。用户看到的是「点了
+     *     能打开,但没存下来」,而那不是"下载失败",是压根没走下载。
+     *
+     * Python 服务端一直是带 attachment 发的(所以桌面浏览器会存),Android 这一侧
+     * 漏了,于是同一个按钮在两个平台上行为不同。这里补齐,两端一致。
+     *
+     * Why this cannot just fall through to serveAsset
+     * ----------------------------------------------
+     * Because that sets no **Content-Disposition**, and here it is the load-bearing
+     * header:
+     *
+     *   - `.tcl` cannot be rendered by a WebView, so it raises a download event anyway;
+     *   - `.txt` **can** — the WebView displays it as text. What the user sees is "it
+     *     opens but is not saved", which is not a failed download: it never was one.
+     *
+     * The Python server has always sent these as attachments (which is why a desktop
+     * browser saves them); the Android side was missing it, so the same button behaved
+     * differently on the two platforms. This makes them agree.
+     */
+    private MiniHttpServer.Response servePlugin(String path) {
+        String name = path.substring("/plugin/".length());
+        boolean isTxt = name.equals("plugin.tcl.txt");
+        if (!isTxt && !name.equals("plugin.tcl")) {
+            return MiniHttpServer.Response.text(404, "not found: plugin/" + name);
+        }
+
+        MiniHttpServer.Response r = serveAsset(path);
+        if (r.status == 200) {
+            // TXT 版存下来的文件名就是 tcl.txt —— 它存在的理由就是蓝牙发送时
+            // 安卓端拒收 .tcl,换个扩展名就能过。
+            // The TXT copy saves as tcl.txt: it exists because Android refuses .tcl over
+            // Bluetooth, and a different extension gets through.
+            String download = isTxt ? "tcl.txt" : "plugin.tcl";
+            r.extraHeaders.put("Content-Disposition",
+                    "attachment; filename=\"" + download + "\"");
+        }
+        return r;
+    }
+
     private MiniHttpServer.Response serveAsset(String path) {
         String name = path;
         if (name.startsWith("/")) name = name.substring(1);

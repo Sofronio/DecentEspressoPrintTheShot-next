@@ -1,7 +1,9 @@
 package com.printtheshot.app;
 
 import android.Manifest;
+import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
@@ -73,6 +75,9 @@ public class MainActivity extends BridgeActivity {
         // super.onCreate(), which is when getBridge() stops being null.
         registerWakeHook();
 
+        // 下载交给系统浏览器 / hand downloads to the system browser
+        routeDownloadsToBrowser();
+
         // 拉起前台服务。没有它,App 一退到后台就会被 Android 冻结:服务端收不到
         // 上传、WebView 不渲染,整条链路静默断掉。而这个 App 的正常形态恰恰就是
         // 「Decaid 在前台,它待在后台等 shot」—— 所以这里是自动的,不是可选项。
@@ -99,6 +104,55 @@ public class MainActivity extends BridgeActivity {
     public void onResume() {
         super.onResume();
         startKeepAlive();
+    }
+
+    /**
+     * 把 WebView 里的下载交给系统浏览器 / hand WebView downloads to the system browser.
+     *
+     * 问题:WebView **不会自己保存文件**。界面上的「下载插件」前两个按钮是
+     * `<a href="/plugin/plugin.tcl" download>`,在桌面浏览器里正常,在 APK 里点了
+     * 没有任何反应 —— 没有报错,也没有文件,因为没人处理下载这件事。第三个(TXT)
+     * 看起来「能打开」只是因为带着 .txt 的地址被当成一次普通导航,浏览器能显示它,
+     * 但那不是下载,不会存到任何地方。
+     *
+     * Capacitor 自己也没有设 DownloadListener(本项目用的 6.x),所以要在原生侧接:
+     * 拿到下载 URL 转给系统浏览器,由它去取、去存。地址是 http://localhost:8000/...,
+     * 也就是这个 App 自己起的服务 —— 浏览器在同一个设备上,够得着。
+     *
+     * The problem: a WebView **does not save files on its own**. The first two plugin
+     * download buttons are `<a href="/plugin/plugin.tcl" download>`, which works in a
+     * desktop browser and does nothing at all inside an APK — no error and no file,
+     * because nothing handles the download. The third (TXT) only appears to "open"
+     * because a .txt URL is treated as ordinary navigation: the browser can display it,
+     * but that is not a download and nothing is stored anywhere.
+     *
+     * Capacitor (6.x, what this project uses) sets no DownloadListener either, so it has
+     * to be caught natively: take the download URL and hand it to the system browser to
+     * fetch and save. The URL is http://localhost:8000/... — this app's own server, and
+     * the browser is on the same device, so it can reach it.
+     */
+    private void routeDownloadsToBrowser() {
+        Bridge bridge = getBridge();
+        if (bridge == null) return;
+        WebView webView = bridge.getWebView();
+        if (webView == null) return;
+
+        webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
+            if (url == null || url.isEmpty()) return;
+            try {
+                Intent view = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(view);
+                Log.i(TAG, "下载已转交浏览器 / download handed to the browser: " + url);
+            } catch (Exception e) {
+                // 设备上没有任何浏览器能处理这个 URL。说清楚,别让它变成一个
+                // 「点了没反应」的静默失败。
+                // No browser on the device can handle the URL. Say so, rather than
+                // leaving it as a silent "I tapped it and nothing happened".
+                Log.w(TAG, "没有应用能打开这个下载 / nothing can open this download: "
+                        + e.getMessage());
+            }
+        });
     }
 
     /**
