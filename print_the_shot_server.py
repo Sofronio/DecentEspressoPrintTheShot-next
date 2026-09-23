@@ -38,6 +38,7 @@ import sys
 import json
 import time
 import base64
+import hashlib
 import threading
 import subprocess
 import argparse
@@ -822,17 +823,118 @@ def refresh_printer(config=None):
 # filename and claimed by whichever end owns the printer (a browser on macOS or an
 # Android WebView), which renders it and POSTs to /api/print. The client then acks
 # to remove it, so nothing prints twice.
-pending_prints = []      # [{"filename":..., "queued": "...", "attempts": n}]
+pending_prints = []      # [{"filename":..., "hash":..., "queued": "...", "attempts": n}]
 pending_lock = threading.Lock()
 MAX_PENDING = 50
 
+# 打印去重窗口(秒)/ the print de-duplication window, in seconds
+# 一份**内容相同**的 shot 在这么久之内不再打印第二次。
+# A shot with identical **content** is not printed again within this window.
+DEDUPE_WINDOW_S = 30
+
+# 内容哈希 → 最近一次打印成功的时刻 / content hash → when it was last printed
+printed_at = {}
+
+def _shot_content_hash(filename):
+    """
+    按内容算哈希 / hash the stored shot's content.
+
+    为什么按内容而不是按文件名去重:每次上传都会生成一个新文件名(带微秒 ID),
+    所以同一个 shot 传三次就是三个不同的名字,按名字拦不住。而上游确实会重复
+    上传 —— DE1 侧的 after_flow_complete 可能重复触发,插件里那个
+    last_upload_shot 只赋值、从不比较,HTTP 超时重试时服务端其实也已经存盘了。
+    结果就是同一张票出好几次。
+
+    读不到文件就返回 None —— 拿不到内容就不参与去重,宁可多打一次,也不要因为
+    算不出哈希而漏打。
+
+    Why content rather than filename: every upload gets a fresh filename (it carries a
+    microsecond ID), so one shot uploaded three times is three different names and a
+    name-based check catches nothing. And the upstream really does repeat — the DE1's
+    after_flow_complete can fire more than once, the plugin's last_upload_shot is
+    assigned but never compared, and an HTTP timeout retry arrives after the server
+    already stored the shot. The result is the same receipt coming out several times.
+
+    Returns None when the file cannot be read: no content, no de-duplication.
+    Printing twice beats silently skipping.
+    """
+    try:
+        with open(os.path.join(DATA_DIR, os.path.basename(filename)), "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+def _printed_recently(h, now=None):
+    """这份内容刚刚已经打过了吗 / has this content just been printed?"""
+    if not h:
+        return False
+    when = printed_at.get(h)
+    return when is not None and ((now or time.time()) - when) <= DEDUPE_WINDOW_S
+
+def _pending_has_hash(h):
+    """
+    这份内容已经在队列里等着了吗 / is this content already waiting in the queue?
+
+    「已经打印过」拦不住**同时**到达的那几次重复上传:它们在第一份打印完成之前就
+    都进来了,那时 printed_at 里还没有东西。要在这里按内容再拦一道,队列才不会
+    一下子排进三份一样的。
+
+    "Already printed" does nothing about duplicates that arrive *at the same time*:
+    they all land before the first one finishes printing, so printed_at is still empty.
+    Checking the queue by content as well is what keeps three identical copies from
+    piling up in the first place.
+    """
+    return bool(h) and any(j.get("hash") == h for j in pending_prints)
+
+def _prune_printed(now=None):
+    """
+    清掉过期的哈希 / drop hashes whose window has passed.
+
+    不清理的话,这个字典会随运行时间一直长 —— 它按内容哈希累积,和 shot 数量同阶。
+    只在记录时顺手扫一遍,不值得为它单开一个线程。
+
+    Without this the dict grows for as long as the process lives — one entry per
+    distinct shot. Swept opportunistically on write; not worth its own thread.
+    """
+    now = now or time.time()
+    for h in [h for h, t in printed_at.items() if now - t > DEDUPE_WINDOW_S]:
+        del printed_at[h]
+
 def queue_print_job(filename):
-    """把一条 shot 挂进待打印队列 / add a shot to the pending-print queue."""
+    """
+    把一条 shot 挂进待打印队列 / add a shot to the pending-print queue.
+
+    返回是否真的入了队 / returns whether it actually joined the queue.
+    被去重吃掉时返回 False —— 调用方靠它决定要不要打日志,否则每次重复上传都会
+    打印一句「已加入待打印队列」,而它根本没进队列。
+    False when de-duplication swallowed it: the caller uses this to decide whether to
+    log, or every duplicate upload claims to have been queued when it was not.
+    """
     with pending_lock:
         if any(j["filename"] == filename for j in pending_prints):
-            return
+            return False
+
+        # 哈希在入队时算一次、存进任务里。之后判断「这份打过没有」就只是查表 ——
+        # 否则每次轮询队列都要把 50 个文件重新读一遍再算一遍 SHA-256。
+        # 文件写入后不再改变(重复上传是**新文件名**),所以算一次就够了。
+        #
+        # Hashed once, at queue time, and kept on the job. Afterwards "was this
+        # printed?" is a lookup — otherwise every queue poll would re-read and
+        # re-hash up to 50 files. A stored file never changes (a re-upload is a
+        # *new* filename), so one pass is enough.
+        h = _shot_content_hash(filename)
+
+        # 同一份内容刚打过就别再排队了 —— 上游重复上传的那几次在这里被吸收掉。
+        #
+        # Identical content that was just printed is not queued at all: this is
+        # where the upstream's repeated uploads get absorbed.
+        if _printed_recently(h) or _pending_has_hash(h):
+            print(f"⏭️  内容相同,跳过 / same content, skipping: {filename}")
+            return False
+
         pending_prints.append({
             "filename": filename,
+            "hash": h or "",
             "queued": datetime.now().strftime("%H:%M:%S"),
             "attempts": 0,
         })
@@ -840,11 +942,19 @@ def queue_print_job(filename):
         # Without a cap, a machine that is switched off lets this grow forever
         if len(pending_prints) > MAX_PENDING:
             del pending_prints[:-MAX_PENDING]
+        return True
 
 def take_pending_prints():
     """取出待打印队列(不移除,等客户端 ack)/ read the queue without removing."""
     with pending_lock:
-        return [dict(j) for j in pending_prints]
+        now = time.time()
+        # 第一份打成功之后,同内容的其余副本还排在队列里,但它们已经不该再打了 ——
+        # 前端每打一个任务就重新拉一次队列,正是靠这里把它们滤掉。
+        #
+        # After the first copy prints, the remaining identical copies are still queued
+        # but must not print. The front end re-fetches per job, and this is the filter
+        # that removes them.
+        return [dict(j) for j in pending_prints if not _printed_recently(j.get("hash"), now)]
 
 def ack_pending_print(filename, ok=True):
     """客户端打印完成后确认,把任务摘出队列 / acknowledge a finished job."""
@@ -852,6 +962,14 @@ def ack_pending_print(filename, ok=True):
         for i, job in enumerate(pending_prints):
             if job["filename"] == filename:
                 if ok:
+                    # 记下「这份内容刚打过」。同内容的其余副本下一轮就不在队列里了。
+                    #
+                    # Record that this content has just printed; the remaining
+                    # identical copies drop out of the queue on the next poll.
+                    h = job.get("hash")
+                    if h:
+                        printed_at[h] = time.time()
+                        _prune_printed()
                     del pending_prints[i]
                 else:
                     job["attempts"] = job.get("attempts", 0) + 1
@@ -1951,8 +2069,8 @@ class PrintTheShotHandler(http.server.SimpleHTTPRequestHandler):
             # whichever end owns the printer too: this only queues the job. The
             # front end (browser or Android WebView) picks it up, renders and
             # prints, then comes back to acknowledge.
-            queue_print_job(filename)
-            print("🖨️ 已加入待打印队列 / queued for printing: %s" % filename)
+            if queue_print_job(filename):
+                print("🖨️ 已加入待打印队列 / queued for printing: %s" % filename)
 
 # ---------------------------------------------------------------------------
 # 入口 Entry

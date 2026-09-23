@@ -9,6 +9,7 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.nio.file.Files;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -53,6 +54,15 @@ public class ShotStore {
     private static final int MAX_SHOTS = 5000;
     private static final int MAX_PENDING = 50;
 
+    /**
+     * 打印去重窗口 / the print de-duplication window.
+     *
+     * 一份**内容相同**的 shot 在这么久之内不再打印第二次。
+     *
+     * A shot with identical **content** is not printed again within this window.
+     */
+    static final long DEDUPE_WINDOW_MS = 30_000;
+
     private final File dir;
     private final File indexFile;
     private final Object lock = new Object();
@@ -62,6 +72,24 @@ public class ShotStore {
 
     /** 待打印队列 / the pending-print queue. */
     private final List<JSONObject> pending = new ArrayList<>();
+
+    /**
+     * 内容哈希 → 最近一次**打印成功**的时刻 / content hash → when it was last printed.
+     *
+     * 为什么按内容而不是按文件名去重:每一次上传都会生成一个新文件名(带微秒 ID),
+     * 所以同一个 shot 被传三次就是三个不同的名字,按名字拦不住。而上游确实会重复
+     * 上传 —— DE1 侧的 after_flow_complete 可能重复触发,插件里那个
+     * last_upload_shot 只赋值、从不比较,HTTP 超时重试时服务端其实也已经存盘了。
+     * 结果就是同一张票出好几次。
+     *
+     * Why content rather than filename: every upload gets a fresh filename (it carries a
+     * microsecond ID), so one shot uploaded three times is three different names and a
+     * name-based check catches nothing. And the upstream really does repeat — the DE1's
+     * after_flow_complete can fire more than once, the plugin's last_upload_shot is
+     * assigned but never compared, and an HTTP timeout retry arrives after the server
+     * already stored the shot. The result is the same receipt coming out several times.
+     */
+    private final Map<String, Long> printedAt = new LinkedHashMap<>();
 
     public ShotStore(Context ctx) {
         dir = new File(ctx.getFilesDir(), "shots_data");
@@ -333,10 +361,94 @@ public class ShotStore {
         return false;
     }
 
+    /**
+     * 按内容算哈希 / hash the content of a stored shot.
+     *
+     * 读文件、算 SHA-256。读不到(文件还没落盘、已被清理)就返回 null —— 拿不到
+     * 内容就不参与去重,宁可多打一次也不要因为算不出哈希而漏打。
+     *
+     * Reads the file and hashes it. Returns null when it cannot be read — no content,
+     * no de-duplication: printing twice is better than silently skipping.
+     */
+    private String contentHash(String filename) {
+        try {
+            File f = new File(dir, new File(filename).getName());
+            if (!f.exists()) return null;
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(Files.readAllBytes(f.toPath()));
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 这份内容刚刚已经打过了吗 / has this content just been printed? */
+    private boolean hashPrintedRecentlyLocked(String hash) {
+        if (hash == null || hash.isEmpty()) return false;
+        Long when = printedAt.get(hash);
+        return when != null && (System.currentTimeMillis() - when) <= DEDUPE_WINDOW_MS;
+    }
+
+    /**
+     * 这份内容已经在队列里等着了吗 / is this content already waiting in the queue?
+     *
+     * 「已经打印过」拦不住**同时**到达的那几次重复上传:它们在第一份打印完成之前
+     * 就都进来了,那时 printedAt 里还没有东西。要在这里按内容再拦一道,队列才不会
+     * 一下子排进三份一样的。
+     *
+     * "Already printed" does nothing about duplicates that arrive *at the same time*:
+     * they all land before the first one finishes printing, so printedAt is still empty.
+     * Checking the queue by content as well is what keeps three identical copies from
+     * piling up in the first place.
+     */
+    private boolean hashPendingLocked(String hash) {
+        if (hash == null || hash.isEmpty()) return false;
+        for (JSONObject o : pending) {
+            if (hash.equals(o.optString("hash"))) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 惰性清理过期条目 / drop entries whose window has passed.
+     *
+     * 不清理的话,这个 map 会随运行时间一直长 —— 它按内容哈希累积,和 shot 数量
+     * 同阶。只在记录时顺手扫一遍,不值得为它单开一个定时器。
+     *
+     * Without this the map grows for as long as the process lives — it accumulates one
+     * entry per distinct shot. Swept opportunistically on write; not worth a timer.
+     */
+    private void prunePrintedLocked() {
+        long now = System.currentTimeMillis();
+        printedAt.entrySet().removeIf(e -> (now - e.getValue()) > DEDUPE_WINDOW_MS);
+    }
+
     private void queuePrintLocked(String filename) {
         try {
+            // 哈希在入队时算一次,存进任务里。之后判断「这份打过没有」就只是查表 ——
+            // 否则每次轮询队列都要把 50 个文件重新读一遍再算一遍 SHA-256。
+            // 文件写入后不再改变(重复上传是**新文件名**),所以算一次就够了。
+            //
+            // Hashed once, at queue time, and kept on the job. Afterwards "was this
+            // printed?" is a lookup — otherwise every queue poll would re-read and
+            // re-hash up to 50 files. A stored file never changes (a re-upload is a
+            // *new* filename), so one pass is enough.
+            String hash = contentHash(filename);
+
+            // 同一份内容刚打过就别再排队了 —— 上游重复上传的那几次在这里被吸收掉。
+            //
+            // Identical content that was just printed is not queued at all: this is
+            // where the upstream's repeated uploads get absorbed.
+            if (hashPrintedRecentlyLocked(hash) || hashPendingLocked(hash)) {
+                Log.i(TAG, "内容相同,跳过 / same content, skipping: " + filename);
+                return;
+            }
+
             JSONObject job = new JSONObject();
             job.put("filename", filename);
+            job.put("hash", hash == null ? "" : hash);
             job.put("queued", new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date()));
             job.put("attempts", 0);
             pending.add(job);
@@ -354,7 +466,16 @@ public class ShotStore {
     public JSONArray pendingJobs() {
         synchronized (lock) {
             JSONArray arr = new JSONArray();
-            for (JSONObject o : pending) arr.put(o);
+            for (JSONObject o : pending) {
+                // 第一份打成功之后,同内容的其余副本还排在队列里,但它们已经不该再
+                // 打了 —— 前端每次轮询都重新拉队列,正是靠这里把它们滤掉。
+                //
+                // After the first copy prints, the remaining identical copies are still
+                // queued but must not print. The front end re-fetches per job, and this
+                // filter is what removes them.
+                if (hashPrintedRecentlyLocked(o.optString("hash"))) continue;
+                arr.put(o);
+            }
             return arr;
         }
     }
@@ -378,6 +499,15 @@ public class ShotStore {
                 JSONObject o = pending.get(i);
                 if (!filename.equals(o.optString("filename"))) continue;
                 if (ok) {
+                    // 记下「这份内容刚打过」。同内容的其余副本下一轮就不在队列里了。
+                    //
+                    // Record that this content has just printed; the remaining
+                    // identical copies drop out of the queue on the next poll.
+                    String hash = o.optString("hash");
+                    if (!hash.isEmpty()) {
+                        printedAt.put(hash, System.currentTimeMillis());
+                        prunePrintedLocked();
+                    }
                     pending.remove(i);
                 } else {
                     int attempts = o.optInt("attempts", 0) + 1;

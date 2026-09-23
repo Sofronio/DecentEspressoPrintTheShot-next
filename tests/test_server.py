@@ -289,6 +289,152 @@ class ServerTest(unittest.TestCase):
             self.assertIn(status, (400, 404), "traversal probe %r must be refused" % probe)
             self.assertNotIn(b"root:", raw, "traversal probe %r leaked a system file" % probe)
 
+    # ------------------------------------------------------------------ 去重
+    # ------------------------------------------------------------------ de-duplication
+
+    def _upload_bytes(self, payload):
+        """上传指定内容,返回落盘文件名 / upload the given bytes, return the stored name."""
+        req = urllib.request.Request(
+            BASE + "/upload?machine_id=TEST-RIG", data=payload,
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        self.assertEqual(body.get("status"), "success")
+        return body["message"].rsplit(" ", 1)[-1]
+
+    def _queue_names(self):
+        _, q = http_json("GET", "/api/print-queue")
+        return [j["filename"] for j in q["jobs"]]
+
+    def _wait_queued(self, filename, tries=50):
+        """等后台记账线程把这条写进队列 / wait for the background recorder."""
+        for _ in range(tries):
+            if filename in self._queue_names():
+                return True
+            time.sleep(0.1)
+        return False
+
+    def _payload(self, marker):
+        """
+        带唯一标记的样例 / the sample shot with a unique marker.
+
+        去重是按**内容**做的,而整个类共用同一个服务端进程 —— 所以每个用例都必须
+        用自己独有的内容,否则前一个用例留下的 pending / printed 状态会把这个用例
+        吃掉。加一个标记字段就够:服务端存的是原始请求体,内容变了哈希就变了。
+
+        De-duplication is by **content**, and the whole class shares one server process,
+        so every test needs content of its own — otherwise the pending/printed state
+        left by an earlier test swallows this one. One marker field is enough: the
+        server stores the raw body, so a changed field moves the hash.
+        """
+        with open(SAMPLE, "rb") as f:
+            shot = json.loads(f.read())
+        shot["_test_marker"] = marker
+        return json.dumps(shot).encode("utf-8")
+
+    def test_identical_content_is_queued_once(self):
+        """
+        同一份内容传两次,队列里只应有一条。
+
+        上游确实会重复上传:DE1 侧的 after_flow_complete 可能重复触发,插件里那个
+        last_upload_shot 只赋值、从不比较,HTTP 超时重试时服务端其实也已经存盘了。
+        而每次上传的文件名都不同(带微秒 ID),所以按文件名去重拦不住,只能按**内容**拦。
+
+        The upstream really does repeat: the DE1's after_flow_complete can fire more
+        than once, the plugin's last_upload_shot is assigned but never compared, and an
+        HTTP timeout retry arrives after the server has already stored the shot. Each
+        upload gets a different filename (it carries a microsecond ID), so a name-based
+        check catches nothing — only a content-based one does.
+        """
+        payload = self._payload("identical")
+
+        first = self._upload_bytes(payload)
+        self.assertTrue(self._wait_queued(first), "第一份应进队列 / the first copy should be queued")
+
+        # 等第一份确实排进队列之后再传第二份 —— 否则两条上传会和后台记账线程抢跑,
+        # 测试就变成飘忽的。
+        #
+        # Only upload the second copy once the first is really in the queue; otherwise
+        # both race the background recorder and the test turns flaky.
+        second = self._upload_bytes(payload)
+        self.assertNotEqual(first, second, "两次上传的文件名应不同 / filenames should differ")
+        time.sleep(1.0)
+
+        names = self._queue_names()
+        self.assertIn(first, names)
+        self.assertNotIn(second, names,
+                         "同内容的第二份不该进队列 / the identical copy must not be queued")
+
+    def test_content_printed_recently_is_not_queued_again(self):
+        """
+        打印成功之后,窗口期内同样的内容不再排队。这是「同一张票出两次」的正解:
+        第一次打完了,后面那几次重复上传应该被吃掉,而不是再出几张。
+
+        After a successful print, identical content is not queued again inside the
+        window. This is the fix for "the same receipt comes out twice": the first one
+        printed, so the repeats should be swallowed rather than printed again.
+        """
+        payload = self._payload("printed")
+
+        first = self._upload_bytes(payload)
+        self.assertTrue(self._wait_queued(first))
+
+        # 模拟前端打印成功后的回执 / simulate the front end's ack after printing
+        _, a = http_json("POST", "/api/print-queue/ack", {"filename": first, "ok": True})
+        self.assertTrue(a["success"])
+
+        second = self._upload_bytes(payload)
+        time.sleep(1.0)
+        self.assertNotIn(second, self._queue_names(),
+                         "刚打印过的内容不该再排队 / content just printed must not be re-queued")
+
+    def test_different_content_is_queued_separately(self):
+        """
+        内容不同就该各排各的 —— 去重只认内容,不能把正常的第二杯咖啡吃掉。
+
+        Different content queues separately: the de-duplication is by content only and
+        must never swallow a legitimately different shot.
+        """
+        a = self._upload_bytes(self._payload("diff-a"))
+        self.assertTrue(self._wait_queued(a))
+        b = self._upload_bytes(self._payload("diff-b"))
+        self.assertTrue(self._wait_queued(b), "不同内容应各自进队列 / different content should queue")
+
+        names = self._queue_names()
+        self.assertIn(a, names)
+        self.assertIn(b, names)
+
+    def test_dedupe_window_expires(self):
+        """
+        窗口过期之后同样的内容应重新打印 —— 这是「30 秒」和「永远」的分界线。
+
+        直接驱动时间,不去真等 30 秒:窗口的判定逻辑在服务端进程里,而测试跑在
+        另一个进程,只能就地 import 进来验证。
+        (跨进程判定只能靠墙钟,那样要么很慢,要么很飘。)
+
+        After the window expires the same content prints again — that is the line
+        between "30 seconds" and "forever". Time is driven directly rather than waiting
+        30 real seconds: the window logic lives inside the server process and this test
+        runs in another one, so it is imported locally instead.
+        """
+        sys.path.insert(0, ROOT)
+        import print_the_shot_server as m
+
+        base = 1000.0
+        m.printed_at.clear()
+        m.printed_at["deadbeef"] = base
+
+        self.assertTrue(m._printed_recently("deadbeef", now=base + m.DEDUPE_WINDOW_S),
+                        "窗口边界上仍算刚打印过 / still inside the window at the boundary")
+        self.assertFalse(m._printed_recently("deadbeef", now=base + m.DEDUPE_WINDOW_S + 1),
+                         "过了窗口就该重新打印 / past the window it prints again")
+
+        # 没有哈希(文件读不到)不参与去重 / no hash (unreadable file) means no de-duplication
+        self.assertFalse(m._printed_recently("", now=base))
+        self.assertFalse(m._printed_recently(None, now=base))
+
+        m.printed_at.clear()
+
     # ------------------------------------------------------------------ 打印
     # ------------------------------------------------------------------ printing
 
