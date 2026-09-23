@@ -9,7 +9,7 @@
   它 = Capacitor 生成的默认内容 + 下面这些打印相关的补充:
 
     - 蓝牙权限(经典 SPP 打印用)
-    - 前台服务 + dataSync 类型(后台保活用)
+    - 前台服务 + connectedDevice 类型(后台保活用)
     - 通知权限(前台服务的常驻通知用)
     - 明文本地网络访问(访问局域网里的 PrintTheShot HTTP 服务端)
 
@@ -25,7 +25,7 @@
   Capacitor content plus the printing-specific additions:
 
     - Bluetooth permissions (classic SPP printing)
-    - Foreground service with the dataSync type (background keep-alive)
+    - Foreground service with the connectedDevice type (background keep-alive)
     - Notification permission (for the service's persistent notification)
     - Cleartext LAN access (to reach the PrintTheShot HTTP service on the LAN)
 
@@ -79,13 +79,27 @@
     <!--
       前台服务保活 / foreground service keep-alive
       ==================================================================
-      FOREGROUND_SERVICE 是基础权限;FOREGROUND_SERVICE_DATA_SYNC 是 Android 14
-      (API 34) 起为 dataSync 类型单独要的权限 —— 打印属于「在本机与外部设备之间
-      搬运数据」,对应 dataSync。两个都要,少一个在 API 34 上会直接抛异常。
-      FOREGROUND_SERVICE is the base permission; FOREGROUND_SERVICE_DATA_SYNC is
-      the extra one Android 14 (API 34) requires for the dataSync type —
-      printing is "moving data between the device and an external device", i.e.
-      dataSync. Both are required; missing one throws on API 34.
+      FOREGROUND_SERVICE 是基础权限;FOREGROUND_SERVICE_CONNECTED_DEVICE 是
+      Android 14 (API 34) 起为 connectedDevice 类型单独要的权限。两个都要,
+      少一个在 API 34 上会直接抛异常。
+      FOREGROUND_SERVICE is the base permission; FOREGROUND_SERVICE_CONNECTED_DEVICE
+      is the extra one Android 14 (API 34) requires for the connectedDevice type.
+      Both are required; missing one throws on API 34.
+
+      为什么是 connectedDevice 而不是 dataSync:这个服务的全部工作就是维持与
+      **蓝牙打印机**的连接并在有 shot 时往它写字节 —— 字面上就是「与外部设备交互」,
+      这正是 connectedDevice 的定义。而 dataSync 在 Android 15 起有每日累计 6 小时的
+      上限(24 小时内),超时会被系统停掉;连接打印机的服务被判成 dataSync,就等于
+      给「常驻」判了死刑,而常驻恰恰是这个 App 存在的形式。
+      connectedDevice 不在该限制的适用类型里,于是可以一直开着。
+
+      Why connectedDevice rather than dataSync: the service's entire job is holding a
+      link to a **Bluetooth printer** and writing bytes to it when a shot arrives —
+      literally "interacting with an external device", which is the definition of
+      connectedDevice. dataSync, from Android 15, carries a 6-hour-per-24-hour cap and
+      is stopped by the system when it expires; classifying a printer link as dataSync
+      would doom the one thing this app is for. connectedDevice is not among the types
+      that limit applies to, so the service can stay up.
 
       POST_NOTIFICATIONS 是 Android 13 (API 33) 起发通知要的用户同意,前台服务的
       常驻通知需要它。用户拒绝只影响通知显示,不影响打印。
@@ -94,7 +108,7 @@
       Declining it only hides the notification; printing still works.
     -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
@@ -144,18 +158,22 @@
           打印前台服务 / the printing foreground service
           ==================================================================
           exported="false":只给本 App 用,别的应用起不了它。
-          foregroundServiceType="dataSync":Android 14 (API 34) 起前台服务必须声明
-          类型,漏了会在 startForeground 时抛 MissingForegroundServiceTypeException。
+          foregroundServiceType="connectedDevice":Android 14 (API 34) 起前台服务
+          必须声明类型,漏了会在 startForeground 时抛
+          MissingForegroundServiceTypeException。选 connectedDevice 的理由见上面
+          权限那一段(蓝牙打印机 = 外部设备;且避开 Android 15 的 dataSync 每日上限)。
           exported="false" because only this app starts it;
-          foregroundServiceType="dataSync" because from Android 14 (API 34) a
+          foregroundServiceType="connectedDevice" because from Android 14 (API 34) a
           foreground service must declare its type or startForeground throws
-          MissingForegroundServiceTypeException.
+          MissingForegroundServiceTypeException. The choice of connectedDevice is
+          explained in the permissions block above (a Bluetooth printer is an external
+          device, and it sidesteps Android 15's daily dataSync cap).
         -->
         <service
             android:name="com.printtheshot.printer.PrinterService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="connectedDevice" />
 
         <!--
           FileProvider:Capacitor 生成工程里自带,留着以免以后加分享/相机类插件时

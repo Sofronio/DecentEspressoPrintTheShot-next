@@ -246,8 +246,15 @@ function url(path) {
   return PrintTheShotPrinter.apiUrl(path);
 }
 
+// 最近一次 /api/status 的结果。插件步骤要拿里面的本机地址,所以留一份 ——
+// 那两个函数是分开调的,不想为了一个地址再去请求一次。
+// The most recent /api/status. The plugin steps need the machine's address from it, and
+// the two are rendered separately; no reason to fetch it twice.
+let lastStatus = null;
+
 async function loadStatus() {
   const s = await api('/api/status');
+  lastStatus = s;
   document.getElementById('subtitle').textContent = `${T('status_running')} · v${s.version}`;
   const items = [
     [T('status_running'), s.status, ''],
@@ -291,12 +298,98 @@ async function loadStatus() {
       box.appendChild(div);
     }
   }
+  renderKeepAlive(s);
+  // 地址到手了,补上第四步 —— 静态文案那边跑的时候它还没到(见 renderPluginStep4)
+  // The address has arrived, so fill in step four; the static pass ran before it landed
+  // (see renderPluginStep4).
+  renderPluginStep4();
   document.getElementById('btn-print').textContent = s.print_enabled ? T('disable_print') : T('enable_print');
   document.getElementById('btn-print').classList.toggle('green', !s.print_enabled);
   document.getElementById('btn-bean').textContent = s.bean_info_enabled ? T('disable_bean_info') : T('enable_bean_info');
   document.getElementById('btn-bean').classList.toggle('gray', s.bean_info_enabled);
   document.getElementById('btn-bean').classList.toggle('green', !s.bean_info_enabled);
   document.getElementById('btn-print').classList.toggle('gray', s.print_enabled);
+}
+
+/**
+ * 后台常驻的状态与开关 / the background keep-alive card.
+ *
+ * 这是 Android 专有的。平板退到后台会被系统冻结 —— 服务端收不到上传,WebView 也不
+ * 渲染,整条链路静默断掉,所以要靠一个前台服务撑着。桌面版没有这个问题(窗口是
+ * 用户自己开着的),因此那边根本不显示这张卡片。
+ *
+ * 状态取自服务端的真实值,而不是前端自己的记性:服务可能被系统停掉,那时界面
+ * 还写着「运行中」就是在骗人。
+ *
+ * Android only. A backgrounded tablet is frozen by the system — the server stops
+ * receiving and the WebView stops rendering, failing silently — so a foreground service
+ * holds it up. The desktop builds have no such problem (the user is running the window),
+ * so the card is absent there.
+ *
+ * The state comes from the server, not from anything this file remembers: the system can
+ * stop the service, and a UI still claiming "running" would be lying.
+ */
+function renderKeepAlive(s) {
+  const box = document.getElementById('status-grid');
+  if (!box) return;
+  // 没有这个字段 = 不是 Android 那套服务端 / no field means this is not the Android server
+  if (s.keepalive === undefined) return;
+
+  let card = document.getElementById('keepalive');
+  if (!card) {
+    card = document.createElement('div');
+    card.className = 'stat';
+    card.id = 'keepalive';
+    card.innerHTML = '<div class="label">' + T('keepalive_label') + '</div>'
+      + '<div class="value" id="keepalive-state"></div>'
+      + '<div class="label" style="margin-top:4px">' + T('keepalive_hint') + '</div>'
+      + '<button class="btn" id="btn-keepalive" style="margin-top:8px"></button>';
+    box.appendChild(card);
+    document.getElementById('btn-keepalive').addEventListener('click', toggleKeepAlive);
+  }
+
+  const on = !!s.keepalive;
+  // 记在 dataset 上,而不是回头去比对翻译过的文案 —— 后者换语言就会失灵
+  // Kept in a dataset rather than read back off the translated label, which would
+  // break the moment the language changes
+  card.dataset.on = on ? '1' : '0';
+
+  const state = document.getElementById('keepalive-state');
+  state.textContent = on ? T('keepalive_on') : T('keepalive_off');
+  state.className = 'value ' + (on ? 'ok' : 'off');
+
+  const btn = document.getElementById('btn-keepalive');
+  btn.textContent = on ? T('keepalive_turn_off') : T('keepalive_turn_on');
+  btn.classList.toggle('gray', on);
+  btn.classList.toggle('green', !on);
+}
+
+/**
+ * 开/关后台常驻 / turn the keep-alive on or off.
+ *
+ * 关掉之后 App 退到后台就会被冻结,所以在界面上说清楚了它管什么;再打开不需要
+ * 重启 App —— 服务是同一个,只是重新 start 一次。
+ *
+ * Turning it off means the app gets frozen once backgrounded, which is why the card
+ * says what it is for. Turning it back on needs no restart: it is the same service,
+ * started again.
+ */
+async function toggleKeepAlive() {
+  const plugin = window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.PrintTheShotPrinter;
+  if (!plugin) return;
+
+  const btn = document.getElementById('btn-keepalive');
+  const wasOn = document.getElementById('keepalive').dataset.on === '1';
+  try {
+    btn.disabled = true;
+    if (wasOn) await plugin.stopForegroundService();
+    else await plugin.startForegroundService();
+  } catch (e) {
+    toast(String((e && e.message) || e));
+  } finally {
+    btn.disabled = false;
+    loadStatus();
+  }
 }
 
 async function loadQueue() {
@@ -790,7 +883,36 @@ function initText() {
   document.getElementById('step1').textContent = T('plugin_step1');
   document.getElementById('step2').textContent = T('plugin_step2');
   document.getElementById('step3').textContent = T('plugin_step3');
-  document.getElementById('step4').textContent = T('plugin_step4');
+  renderPluginStep4();
+}
+
+/**
+ * 第四步里的地址 / the address in step four.
+ *
+ * 单独拎出来,是因为这一步是**依赖状态**的:文案是静态的,但地址来自
+ * /api/status —— 那是异步的,通常比这里的静态文案晚到。只在设置静态文案时算一次
+ * 的话,永远会落到兜底分支,页面看着正常、地址那一条却永远是占位文字。
+ * 所以 loadStatus 拿到结果之后要再调一次。
+ *
+ * 顺带一提,地址后面跟的是 /upload 而不是裸的 8000 端口:插件要填的是完整的
+ * 上传端点。
+ *
+ * A function of its own because this step is **state-dependent**: the string is static
+ * but the address comes from /api/status, which is async and usually arrives after the
+ * static labels are set. Computing it once, while setting those labels, would always
+ * take the fallback branch — the page looks fine and the address line stays a
+ * placeholder forever. loadStatus therefore calls this again once the response lands.
+ *
+ * The address carries /upload rather than a bare port 8000, because what goes into the
+ * plugin is the full upload endpoint.
+ */
+function renderPluginStep4() {
+  const el = document.getElementById('step4');
+  if (!el) return;
+  const lanUrl = (lastStatus && lastStatus.lan_url) || '';
+  el.textContent = lanUrl
+    ? T('plugin_step4').replace('{URL}', lanUrl + '/upload')
+    : T('plugin_step4').replace('{URL}', T('plugin_step4_fallback'));
   const hPrint = document.getElementById('h-print');
   if (hPrint) hPrint.textContent = T('h_print');
 }

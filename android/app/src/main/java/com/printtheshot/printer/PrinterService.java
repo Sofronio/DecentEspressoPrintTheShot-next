@@ -26,22 +26,29 @@ import androidx.core.app.NotificationCompat;
  *   2) 顺带把 {@link LocalPrintBridge} 那个本机 HTTP 桥拉起来(默认开),给
  *      「服务端也跑在这台 Android 上」的部署方式留出口。
  *
- * 什么时候该关:不打印的时候就关掉。前台服务一直挂着费电,而且从 Android 15
- * (API 35) 起,dataSync 类型的前台服务有每日累计时长上限,挂太久会被系统掐掉。
- * 所以它是个「需要时开、用完关」的东西,不是常驻。
- * When to stop it: when you are not printing. A always-on foreground service
- * drains the battery, and from Android 15 (API 35) the dataSync type has a
- * daily cumulative runtime cap, after which the system stops it. It is meant
- * to be started when needed and stopped afterwards, not to run forever.
+ * 常驻,而不是「用完就关」:这个 App 存在的形式就是「平板在后台待命,Decaid 在前台,
+ * 咖啡机一结束就出票」。退到后台的进程会被 Android 冻结 —— 服务端收不到、WebView
+ * 不渲染,整个链路就断了。所以它必须一直开着。
+ * Always on, rather than "start when needed": the whole point of this app is to sit in
+ * the background while Decaid is in the foreground and print the moment a shot ends.
+ * A backgrounded process gets frozen — the server stops receiving and the WebView stops
+ * rendering — so the service has to stay up for any of it to work.
  *
  * 类型声明 / service type:
- *   打印属于「在本机与外部设备之间搬运数据」,对应 dataSync,所以
- *   AndroidManifest 里声明 `android:foregroundServiceType="dataSync"` ——
+ *   蓝牙打印机 = 外部设备,所以是 connectedDevice,而不是 dataSync。
+ *   这不只是语义更准:Android 15 (API 35) 起 dataSync 有每日累计 6 小时的上限
+ *   (24 小时内),到点系统会把服务停掉;而 connectedDevice 不在该限制的适用类型里。
+ *   当初选 dataSync 是按「搬运数据」理解的,结果给「常驻」判了死刑 —— 而常驻正是
+ *   这个服务唯一有意义的形态。
+ *   A Bluetooth printer is an external device, hence connectedDevice rather than
+ *   dataSync. That is not just a naming preference: from Android 15 (API 35) dataSync
+ *   carries a cumulative 6-hour-per-24-hour cap and the system stops the service when
+ *   it expires, while connectedDevice is not among the types that limit applies to.
+ *   dataSync was chosen by reading the job as "moving data", which quietly ruled out
+ *   the only shape this service makes sense in.
+ *
  *   Android 14 (API 34) 起,前台服务不声明类型会直接抛异常。
- *   Printing is "moving data between the device and an external device", i.e.
- *   dataSync, hence `android:foregroundServiceType="dataSync"` in the
- *   manifest: from Android 14 (API 34) a foreground service without a
- *   declared type throws.
+ *   From Android 14 (API 34) a foreground service without a declared type throws.
  *
  * 通知 / notification:
  *   Android 13 (API 33) 起发通知需要 POST_NOTIFICATIONS 权限。用户拒绝的话服务
@@ -273,17 +280,17 @@ public class PrinterService extends Service {
      * 进前台 / enter the foreground state.
      *
      * Android 10 (API 29) 起可以显式带上服务类型;Android 14 (API 34) 起类型
-     * 必须与 manifest 里声明的一致(dataSync),否则直接抛异常。
+     * 必须与 manifest 里声明的一致(connectedDevice),否则直接抛异常。
      * From Android 10 (API 29) the service type can be passed explicitly, and
      * from Android 14 (API 34) it must match the manifest declaration
-     * (dataSync) or the call throws.
+     * (connectedDevice) or the call throws.
      */
     private void startForegroundCompat() {
         Notification notification = buildNotification();
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(NOTIFICATION_ID, notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
             } else {
                 startForeground(NOTIFICATION_ID, notification);
             }

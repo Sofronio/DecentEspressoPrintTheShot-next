@@ -6,6 +6,7 @@ import android.os.Looper;
 import android.util.Log;
 
 import com.printtheshot.printer.BluetoothPrinter;
+import com.printtheshot.printer.PrinterService;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -430,6 +431,16 @@ public class AppServer implements MiniHttpServer.Handler {
         // The device's own LAN address, which the user types into the DE1 plugin
         out.put("lan_ip", DeviceInfo.lanIp());
         out.put("lan_url", DeviceInfo.lanUrl(8000));
+        // 后台常驻是否在跑。前端据此显示状态并提供开关 —— 这个值必须来自服务的
+        // 真实状态,而不是前端自己的记性:服务可能被系统停掉(用户关掉通知、
+        // 厂商省电策略),那时界面还显示「运行中」就是在骗人。
+        //
+        // Whether the background keep-alive is up. The front end shows it and offers a
+        // switch from this value, and it must come from the service's real state rather
+        // than the front end's own memory: the system can stop the service — the user
+        // dismisses the notification, a vendor battery policy kicks in — and a UI still
+        // claiming "running" would be lying.
+        out.put("keepalive", PrinterService.isRunning());
         return out;
     }
 

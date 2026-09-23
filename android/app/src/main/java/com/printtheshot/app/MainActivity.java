@@ -8,6 +8,7 @@ import com.getcapacitor.Bridge;
 import com.getcapacitor.BridgeActivity;
 import com.printtheshot.printer.BluetoothPrinterBridge;
 import com.printtheshot.printer.PrintTheShotPrinterPlugin;
+import com.printtheshot.printer.PrinterService;
 import com.printtheshot.server.DeviceInfo;
 import com.printtheshot.server.ServerHolder;
 
@@ -66,6 +67,35 @@ public class MainActivity extends BridgeActivity {
         // Wake the WebView when the server receives a shot. This has to happen after
         // super.onCreate(), which is when getBridge() stops being null.
         registerWakeHook();
+
+        // 拉起前台服务。没有它,App 一退到后台就会被 Android 冻结:服务端收不到
+        // 上传、WebView 不渲染,整条链路静默断掉。而这个 App 的正常形态恰恰就是
+        // 「Decaid 在前台,它待在后台等 shot」—— 所以这里是自动的,不是可选项。
+        //
+        // Start the foreground service. Without it the app is frozen the moment it
+        // goes to the background: the server stops receiving, the WebView stops
+        // rendering, and the whole chain fails silently. Sitting in the background
+        // while Decaid is in the foreground *is* this app's normal shape, so this is
+        // automatic rather than optional.
+        startKeepAlive();
+    }
+
+    /**
+     * 拉起后台常驻 / bring up the background keep-alive.
+     *
+     * 失败不阻断启动:界面照常能用,只是退到后台会被冻结。界面上那个开关会显示
+     * 实际状态,用户还能手动再试一次。
+     *
+     * A failure here must not block startup: the UI still works, it just gets frozen
+     * when backgrounded. The UI switch reflects the real state and can retry by hand.
+     */
+    private void startKeepAlive() {
+        if (PrinterService.start(this)) {
+            Log.i(TAG, "后台常驻已开启 / keep-alive on");
+        } else {
+            Log.w(TAG, "后台常驻未启动,退到后台会被系统冻结 / keep-alive failed; "
+                    + "the app will be frozen in the background");
+        }
     }
 
     /**

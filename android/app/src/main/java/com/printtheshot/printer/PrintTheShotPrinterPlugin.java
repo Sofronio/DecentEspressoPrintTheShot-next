@@ -430,12 +430,16 @@ public class PrintTheShotPrinterPlugin extends Plugin {
     /**
      * 起前台服务 / start the foreground service.
      *
-     * 打印期间想让 App 退到后台也不断连才需要它;不打印时请随手关掉,前台服务
-     * 一直挂着既费电,Android 15 起 dataSync 类型还有每日时长上限。
-     * Only needed when the app should keep the link alive while in the
-     * background; stop it when done. A permanently running foreground service
-     * drains the battery, and from Android 15 the dataSync type has a daily
-     * time cap.
+     * App 启动时会自己调一次(见 MainActivity),这里是给界面上的开关用的 ——
+     * 关掉之后可以再打开,不必重启 App。
+     * Called automatically when the app starts (see MainActivity); this entry point
+     * exists so the UI switch can turn it back on without restarting the app.
+     *
+     * 常驻的代价是电量和一条常驻通知。类型是 connectedDevice 而不是 dataSync,
+     * 所以没有 Android 15 那个每日 6 小时的上限,可以一直开着。
+     * Residency costs battery and one persistent notification. The type is
+     * connectedDevice rather than dataSync, so Android 15's 6-hour daily cap does not
+     * apply and it can stay up.
      *
      * @return `{success: boolean, running: boolean}`
      */

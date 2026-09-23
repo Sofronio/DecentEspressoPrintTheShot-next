@@ -120,6 +120,34 @@ npx cap copy android
 GEN=android/app/src/main
 OURS=app/src/main
 
+# ---- DE1 插件也打进 APK ----
+#
+# `npx cap copy` 只搬 webDir(web/),而 plugin/plugin.tcl 在仓库根上,于是它
+# 从来不进 APK —— 界面上的「下载插件」三个按钮在平板上全 404,而桌面打包版
+# (PyInstaller 的 datas 里带了 plugin/)是好的。这类「一个平台好、另一个平台
+# 404」的缺口最难发现,因为开发时看的是好的那个。
+#
+# 放两个名字是刻意的:界面上的 TXT 按钮就是同一个文件换扩展名。蓝牙传 .tcl 常被
+# 安卓端拒收,.txt 能过;Python 服务端也是这么做的(见 /plugin/plugin.tcl.txt)。
+#
+# ---- The DE1 plugin ships in the APK too ----
+#
+# `npx cap copy` only moves webDir (web/), and plugin/plugin.tcl lives at the
+# repository root, so it never made it into the APK — every one of the three plugin
+# download buttons 404s on the tablet, while the desktop packages (PyInstaller's datas
+# includes plugin/) are fine. That kind of "works on one platform, 404 on the other"
+# gap is the hardest to notice, because development looks at the working one.
+#
+# Shipping it under two names is deliberate: the TXT button is the same file with a
+# different extension. Android often refuses .tcl over Bluetooth and accepts .txt, and
+# the Python server does exactly the same thing (see /plugin/plugin.tcl.txt).
+# 路径要基于 $REPO_ROOT:脚本此时的工作目录是 android/,写相对路径会找不到文件。
+# Paths must hang off $REPO_ROOT: the script's working directory here is android/, so a
+# relative path looks in the wrong place.
+mkdir -p "$GEN/assets/public/plugin"
+cp "$REPO_ROOT/plugin/plugin.tcl" "$GEN/assets/public/plugin/plugin.tcl"
+cp "$REPO_ROOT/plugin/plugin.tcl" "$GEN/assets/public/plugin/plugin.tcl.txt"
+
 mkdir -p "$GEN/java" "$GEN/res/xml" "$GEN/res/values"
 cp -R "$OURS/java/." "$GEN/java/"
 cp "$OURS/AndroidManifest.xml" "$GEN/AndroidManifest.xml"

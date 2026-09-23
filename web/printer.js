@@ -394,10 +394,61 @@
   var autoPrintEnabled = true;
   var pumping = false;
 
+  /**
+   * 本端已经成功打印过的文件名 → 时刻 / filenames this end has already printed.
+   *
+   * 为什么需要它:打印成功之后要靠 ack 让服务端把任务摘掉,而 ack 是会失败的
+   * (网络抖一下、服务端正忙)。ack 没送到,任务就还留在队列里,下一轮又会取到
+   * 同一个文件 —— **同一张票一张接一张地打**。实测踩过这个:打印机疯狂吐纸。
+   *
+   * 所以「同一个文件只打一次」必须由这一端自己保证,不能依赖 ack 一定成功。
+   * 服务端那份按**内容**去重管的是另一件事(同一 shot 被上传多次、文件名不同),
+   * 两者互补,缺一不可。
+   *
+   * Why this exists: after a successful print the ack is what makes the server drop the
+   * job, and an ack can fail — a network blip, a busy server. When it does, the job
+   * stays queued and the next pass picks up the same file again, printing the same
+   * receipt over and over. This was hit for real: the printer spat paper continuously.
+   *
+   * So "print each file once" has to be this end's own invariant, not something that
+   * depends on the ack arriving. The server's content-based de-duplication covers a
+   * different case — one shot uploaded several times under different filenames — and the
+   * two are complementary.
+   */
+  var printedFiles = {};
+
+  function markPrinted(filename) {
+    var now = Date.now();
+    printedFiles[filename] = now;
+    // 长跑之后不能让它一直涨。10 分钟足够覆盖任何合理的重试,之后同名文件不可能
+    // 还在队列里(文件名带微秒 ID,不会重复)。
+    //
+    // Bounded so it cannot grow forever. Ten minutes covers any plausible retry, and a
+    // filename cannot come back later — they carry a microsecond ID.
+    var cutoff = now - 10 * 60 * 1000;
+    Object.keys(printedFiles).forEach(function (f) {
+      if (printedFiles[f] < cutoff) delete printedFiles[f];
+    });
+  }
+
   async function fetchQueue() {
     var r = await fetch(apiUrl('/api/print-queue'));
     var j = await r.json();
     return j.jobs || [];
+  }
+
+  /** 回执一个任务 / acknowledge one job. 失败不抛,由调用方决定怎么办。 */
+  async function ackJob(filename, ok) {
+    try {
+      await fetch(apiUrl('/api/print-queue/ack'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: filename, ok: !!ok })
+      });
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   async function pumpQueue() {
@@ -422,7 +473,15 @@
       // successful ack the server also drops the remaining copies of *the same
       // content*, and only a fresh fetch sees that; with a batch, the duplicate
       // uploads of one shot all print in the same pass.
-      while (autoPrintEnabled) {
+      // 一轮最多打这么多个。正常情况队列很短,碰到这个数说明前面的假设破了 ——
+      // 宁可停下来留个日志,也不要在这里转圈。
+      //
+      // A hard cap per pass. A normal queue is short; hitting this means an assumption
+      // broke. Better to stop with a log line than to keep spinning here.
+      var MAX_PER_PASS = 20;
+      var done = 0;
+
+      while (autoPrintEnabled && done < MAX_PER_PASS) {
         var jobs;
         try {
           jobs = await fetchQueue();
@@ -431,22 +490,49 @@
         }
         if (!jobs.length) return;
 
-        var job = jobs[0];
+        // 找第一个本端还没打过的任务。队头可能是「刚打过、但 ack 没生效」的那个 ——
+        // 对它就补一次回执,别让它把队头堵死,更不要再打一遍。
+        //
+        // Take the first job this end has not printed yet. The head may be one that just
+        // printed but whose ack never landed: re-ack it and move on — never print it
+        // again, and never let it jam the queue.
+        var job = null;
+        for (var i = 0; i < jobs.length; i++) {
+          if (printedFiles[jobs[i].filename]) {
+            ackJob(jobs[i].filename, true);
+            continue;
+          }
+          job = jobs[i];
+          break;
+        }
+        if (!job) {
+          // 整个队列都是打过的,说明 ack 一直没生效。退出去等下一轮重试,
+          // 总比把同一张票再打一遍强。
+          //
+          // Everything queued has been printed, so the acks are not landing. Leave it
+          // for the next pass — better than printing the same receipt again.
+          return;
+        }
+
         var result = await printShot(job.filename, {});
-        try {
-          await fetch(apiUrl('/api/print-queue/ack'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ filename: job.filename, ok: !!result.success })
-          });
-        } catch (e) { /* 下一轮会重试 / retried next tick */ }
+        done++;
+
+        // 打印成功就先记上,**再**去 ack。顺序很重要:ack 失败时这一笔仍然留着,
+        // 于是下一轮不会再打它。
+        //
+        // Record the success *before* acking. The order matters: if the ack fails, the
+        // record is already there and the next pass will not print it again.
+        if (result.success) markPrinted(job.filename);
+
+        await ackJob(job.filename, result.success);
+
         if (typeof global.onAutoPrint === 'function') {
           try { global.onAutoPrint(job.filename, result); } catch (e) { }
         }
 
         // 失败的任务仍在队列最前面(服务端保留它并累加 attempts,3 次后丢弃)。
         // 这里必须退出去等下一轮,否则这个 while 会立刻又抓到同一个任务,把 3 次
-        // 机会在一瞬间烧光,甚至重复出票。
+        // 机会在一瞬间烧光。
         //
         // A failed job stays at the head of the queue — the server keeps it and counts
         // attempts, dropping it after 3. Bail out and wait for the next tick, or this

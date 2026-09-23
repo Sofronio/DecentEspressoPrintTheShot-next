@@ -104,11 +104,30 @@
   <div class="card">
     <h2 id="h-plugin"></h2>
     <p>
+      <!--
+        app.js 会把这三个 href 换成绝对地址(见那里的注释),这里写的是相对路径。
+        GitHub 那个必须是 **raw 直链**,不能是 releases 页面:按钮写的是「下载」,
+        点开却是网页,用户还得自己找文件再点一次。
+        服务端 config 里的 _REPO 变的时候,这里的 URL 也要跟着变
+        (PLUGIN_GITHUB_URL 是同一个地址,用于自更新)。
+
+        app.js rewrites all three hrefs to absolute URLs (see the note there); these are
+        the relative paths. The GitHub one must be a **raw link**, not the releases page:
+        the button says "download", and landing on a web page means hunting for the file
+        and clicking again. If _REPO changes in the server config, this URL changes too
+        (PLUGIN_GITHUB_URL is the same address, used by the self-updater).
+      -->
       <a class="btn" href="./plugin/plugin.tcl" download id="btn-plugin"></a>
-      <a class="btn gray" href="https://github.com/Sofronio/DecentEspressoPrintTheShot-next/releases" target="_blank" rel="noopener" id="btn-plugin-github"></a>
+      <a class="btn gray" href="https://raw.githubusercontent.com/Sofronio/DecentEspressoPrintTheShot-next/main/plugin/plugin.tcl" target="_blank" rel="noopener" id="btn-plugin-github"></a>
       <a class="btn gray" href="./plugin/plugin.tcl.txt" download="tcl.txt" id="btn-plugin-txt"></a>
     </p>
     <div class="note" id="plugin-note"></div>
+    <!--
+      <ol> 自带序号,所以四条文案里**不要**再手写「1. 2. 3.」—— 那会变成
+      「1. 1. 下载…」。序号交给 ol 自己排。
+      <ol> numbers the steps itself, so the four strings must **not** carry their own
+      "1. 2. 3." — that renders as "1. 1. Download…". Let the list do the numbering.
+    -->
     <ol class="steps">
       <li id="step1"></li>
       <li><code id="step2"></code></li>
