@@ -1237,6 +1237,8 @@ class PrintTheShotHandler(http.server.SimpleHTTPRequestHandler):
             # TXT版:蓝牙发送时安卓端常拒绝无扩展名/.tcl文件,tcl.txt可正常传输 TXT version: Android often rejects extension-less/.tcl files over Bluetooth; tcl.txt transfers fine
             self._serve_file(plugin_runtime_path(), "text/plain", as_attachment=True,
                              download_name="tcl.txt")
+        elif path == "/api/backup/export":
+            self.send_backup_zip()
         elif path.startswith("/download/json/"):
             name = os.path.basename(path)
             self._serve_file(os.path.join(DATA_DIR, name), "application/json", as_attachment=True)
@@ -1858,6 +1860,48 @@ class PrintTheShotHandler(http.server.SimpleHTTPRequestHandler):
         # Reload the adapter so paper/mode changes actually take effect
         refresh_printer(settings["print"])
         self._send_json({"success": True, "config": print_config()})
+
+    def send_backup_zip(self):
+        """
+        GET /api/backup/export —— 把 shot 数据打包成一个 zip 下载。
+
+        为什么要这个 —— 一次真实的教训
+        ------------------------------
+        原本的「备份」只存在于**服务更新**流程里:点更新时顺手存一份到 backup/。
+        用户看不到、也调不到,而它能救的场景只有一个。真正会丢数据的是
+        「卸载重装」(Android 卸载会清掉应用私有目录)和「换设备」—— 那两件事都
+        发生在 App 之外,App 没有任何机会先备份自己。
+
+        所以备份必须是**用户能主动导出、随时能导回**的东西。
+
+        顺带一条纪律:导出完要验证**内容**。这一版就是因为只看了「文件存在、
+        大小不为零」,事后才发现包里空无一物。(见 /api/backup/import)
+        """
+        import io
+        import zipfile
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            count = 0
+            if os.path.isdir(DATA_DIR):
+                for name in sorted(os.listdir(DATA_DIR)):
+                    full = os.path.join(DATA_DIR, name)
+                    if not os.path.isfile(full) or not name.endswith(".json"):
+                        continue
+                    z.write(full, name)
+                    count += 1
+        payload = buf.getvalue()
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition",
+                         'attachment; filename="printtheshot_backup_%s.zip"' % ts)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+        print("💾 已导出备份 / backup exported:%d 个文件,%.1f KB"
+              % (count, len(payload) / 1024.0))
 
     def send_shot_detail(self):
         """
