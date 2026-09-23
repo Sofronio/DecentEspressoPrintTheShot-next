@@ -293,12 +293,12 @@ LANGUAGES = {
         "plugin_step1": "Download plugin.tcl and copy it to the DE1 tablet:",
         "plugin_step2": "/de1plus/plugins/print_the_shot/plugin.tcl",
         "plugin_step3": "Restart DE1App — the plugin loads automatically",
-        # 插件的地址和路径是**两个字段**(Server URL / Server Endpoint),所以这里
-        # 也分成两步 —— 合成一行会让人把路径一起填进地址栏。
-        # The plugin has two separate fields (Server URL / Server Endpoint), hence two
-        # steps: on one line people put the path into the address box.
-        "plugin_step4": "Server address: {HOST}",
-        "plugin_step5": "Path: upload",
+        # 插件的地址和路径是两个字段,但写在同一行 —— 它们是连着做的两件事,拆成
+        # 两条只是把列表拉长。中间加个逗号断开,免得被读成一个值。
+        # The plugin has two fields here, but they go on one line: they are two things
+        # done in one go, and splitting them only lengthens the list. The comma keeps
+        # them from reading as a single value.
+        "plugin_step4": "Server address: {HOST}, path: upload",
         "plugin_step4_fallback": "this machine's IP:8000",
         "language": "Language",
         "queue_status": "Queue Status: {count} jobs",
@@ -458,12 +458,12 @@ LANGUAGES = {
         "plugin_step1": "下载 plugin.tcl 并复制到 DE1 平板:",
         "plugin_step2": "/de1plus/plugins/print_the_shot/plugin.tcl",
         "plugin_step3": "重启 DE1App,插件自动加载",
-        # 插件的地址和路径是**两个字段**(Server URL / Server Endpoint),所以这里
-        # 也分成两步 —— 合成一行会让人把路径一起填进地址栏。
-        # The plugin has two separate fields (Server URL / Server Endpoint), hence two
-        # steps: on one line people put the path into the address box.
-        "plugin_step4": "服务器地址填 {HOST}",
-        "plugin_step5": "path 路径填写 upload",
+        # 插件的地址和路径是两个字段,但写在同一行 —— 它们是连着做的两件事,拆成
+        # 两条只是把列表拉长。中间加个逗号断开,免得被读成一个值。
+        # The plugin has two fields here, but they go on one line: they are two things
+        # done in one go, and splitting them only lengthens the list. The comma keeps
+        # them from reading as a single value.
+        "plugin_step4": "服务器地址填 {HOST},path 路径填写 upload",
         "plugin_step4_fallback": "本机IP:8000",
         "language": "语言",
         "queue_status": "打印队列: {count} 个任务",

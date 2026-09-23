@@ -891,7 +891,6 @@ function initText() {
   document.getElementById('step1').textContent = T('plugin_step1');
   document.getElementById('step2').textContent = T('plugin_step2');
   document.getElementById('step3').textContent = T('plugin_step3');
-  document.getElementById('step5').textContent = T('plugin_step5');
   renderPluginStep4();
 }
 
