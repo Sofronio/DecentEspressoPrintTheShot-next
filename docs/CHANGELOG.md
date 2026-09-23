@@ -64,9 +64,11 @@ everything here comes from one fact: a tablet whose app is not in the foreground
   that says "download" should not land you on a page you have to search.
 - The plugin steps are no longer double-numbered: the `<ol>` numbers them, and the
   strings carried their own "1. 2. 3." on top.
-- Step four shows this machine's actual address instead of the words "this machine's
-  IP", and the address and the path are two steps, because they are two fields in the
-  plugin.
+- Step four shows this machine's actual address rather than the words "this machine's
+  IP", with the path beside it — two fields in the plugin, filled in one go.
+- **The steps now say to create `/de1plus/plugins/print_the_shot/` when it is missing.**
+  That folder does not exist on a fresh install, so the old wording left the user stuck
+  at step one, wondering where the file was supposed to go.
 
 ### Verification
 

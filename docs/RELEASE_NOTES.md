@@ -64,9 +64,11 @@ everything here comes from one fact: a tablet whose app is not in the foreground
   that says "download" should not land you on a page you have to search.
 - The plugin steps are no longer double-numbered: the `<ol>` numbers them, and the
   strings carried their own "1. 2. 3." on top.
-- Step four shows this machine's actual address instead of the words "this machine's
-  IP", and the address and the path are two steps, because they are two fields in the
-  plugin.
+- Step four shows this machine's actual address rather than the words "this machine's
+  IP", with the path beside it — two fields in the plugin, filled in one go.
+- **The steps now say to create `/de1plus/plugins/print_the_shot/` when it is missing.**
+  That folder does not exist on a fresh install, so the old wording left the user stuck
+  at step one, wondering where the file was supposed to go.
 
 ### Verification
 
@@ -157,8 +159,11 @@ or: try to open it once, then **System Settings → Privacy & Security → Open 
 - GitHub 按钮打开 GitHub 上的文件,而不是 releases 页面 —— 写着「下载」的按钮不该
   把人丢到一个还要自己找的页面上。
 - 插件步骤不再重复编号:`<ol>` 自己会编号,而文案里又手写了一层「1. 2. 3.」。
-- 第四步显示本机真实地址,而不是「本机IP」这几个字;地址和路径拆成两步,因为插件里
-  它们本来就是两个字段。
+- 第四步显示本机真实地址,而不是「本机IP」这几个字,路径写在同一条里 —— 插件里是
+  两个字段,但连着填。
+- **步骤里补上「目标文件夹不存在要先建」。** 全新安装时
+  `/de1plus/plugins/print_the_shot/` 并不存在,原来的说法会让人卡在第一步,不知道
+  文件该往哪儿放。
 
 ### 验证
 
