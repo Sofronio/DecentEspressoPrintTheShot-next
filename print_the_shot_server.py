@@ -91,7 +91,7 @@ from io import BytesIO
 #
 # The old numbers still have to compare correctly: a machine running 2.1-beta.3 must
 # know it should update. That mapping lives in _version_key.
-VERSION = "1.0.0-beta.5"
+VERSION = "1.0.0"
 
 # Android 的 versionCode,**独立于 VERSION 单调递增**。
 #
@@ -101,7 +101,7 @@ VERSION = "1.0.0-beta.5"
 # 会清掉他所有的 shot 数据。
 #
 # 所以它拆出来单独维护:发版时 VERSION 和 VERSION_CODE **一起改**,
-# 后者只增不减。当前值 = 上一版 20104 + 1,保证能覆盖现有安装。
+# 后者只增不减。当前值 = 上一版 20105 + 1,保证能覆盖现有安装。
 #
 # Android's versionCode, kept **independent of VERSION** and monotonically
 # increasing.
@@ -113,9 +113,9 @@ VERSION = "1.0.0-beta.5"
 # what wipes all their shot data.
 #
 # So it is maintained separately: bump VERSION and VERSION_CODE **together** on every
-# release, and the latter only ever goes up. Current value = previous 20104 + 1, so it
+# release, and the latter only ever goes up. Current value = previous 20105 + 1, so it
 # covers existing installs.
-VERSION_CODE = 20105
+VERSION_CODE = 20106
 
 def runtime_data_dir():
     """
