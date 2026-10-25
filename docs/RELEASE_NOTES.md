@@ -1,43 +1,25 @@
-# PrintTheShot Next v1.0.0
+# PrintTheShot Next v1.0.0-beta.5
 
 ---
 
 # English
 
-The first stable release of the 1.0 line. The headline is **auto-printing while the
-Android app is in the background** — the way this app is meant to be used: Decaid in
-front, the tablet waiting behind it.
+The release candidate for 1.0.0. It contains the background Bluetooth printing fix,
+the configurable print-queue timeout, and the Android UI fixes; 1.0.0 adds no code
+changes beyond the version number.
 
 ### Fixed
 
-- **Background Bluetooth printing now works.** Shots received while the app was
-  backgrounded used to sit in the queue until the app came forward. Bluetooth was not
-  the problem: Chromium freezes the hidden WebView's event loop, so the printing code
-  stalled on its first network request and never sent anything. The server now renders
-  the receipt synchronously inside the WebView, receives the ESC/POS bytes, and writes
-  them to Bluetooth from its foreground service. Verified on the tablet with a shot
-  uploaded while the app was in the background.
-- **Old queue entries no longer print in a burst when the app comes back.** Pending
-  jobs older than **3 minutes** are dropped instead of printed as a backlog. The timeout
-  is configurable in Print settings; the shot history is untouched.
-- **The two switches on the status card now work on Android.** Turning printing off
-  stops auto-printing but still stores new shots; turning bean info off removes that
-  column from the chart. Both persist across restarts.
-- **Receipts show the correct machine name.** The large-view and thumbnail print paths
-  read the raw shot JSON, which has no machine name; the server now fills it in, so a
-  receipt no longer says `UNKNOWN` while the UI shows `de1xl`.
-- **Saving a PNG or JSON from the large view works in the APK.** A WebView ignores
-  `<a download>`; the native plugin now writes the bytes into Downloads. The large view
-  also has a real close button.
-- **The UI language choice survives a reload in the APK**, and the server's injected
-  language table is actually used. A placeholder-substitution bug had made the language
-  switch a no-op in both the browser and the APK.
-- **Refresh now reports that it finished**, instead of looking like it did nothing.
-
-### Changed
-
-- `1.0.0` is the first stable release; it sorts after every `1.0.0-beta.N`, so beta
-  users can update in place.
+- **Background Bluetooth printing.** A shot received while the app is backgrounded is
+  now rendered synchronously and written to Bluetooth by the foreground service, instead
+  of waiting for the app to come forward. The hidden WebView's async event loop is
+  frozen, so the new path deliberately does not use it.
+- **Stale print queue.** Pending jobs older than 3 minutes (configurable in Print
+  settings) are dropped instead of printed in a burst when the app returns.
+- **Android fixes in this build.** The print/bean-info switches now work and persist;
+  receipts show the real machine name; saving PNG/JSON writes into Downloads; the UI
+  language choice survives a reload; the large view has a working close button; Refresh
+  reports completion.
 
 ## Downloads
 
@@ -70,33 +52,19 @@ or: try to open it once, then **System Settings → Privacy & Security → Open 
 
 # 中文
 
-1.0 线的第一个稳定版。这一版最重要的是 **Android 应用在后台时,自动打印现在真的能
-工作** —— 这正是它被设计出来的使用形态:Decaid 在前台,平板在后台待命。
+1.0.0 的候选版本。包含后台蓝牙打印修复、可配置的打印队列超时,以及一批 Android
+界面修复;1.0.0 相比这一版只改版本号,不再改代码。
 
 ### 修复
 
-- **后台蓝牙打印。** 应用在后台时收到的 shot 以前只入队,直到切回前台才出票。
-  原因不在蓝牙:Chromium 会冻结隐藏 WebView 的事件循环,前端卡在第一个网络请求,
-  根本到不了打印调用。现在服务端在 WebView 里做一次**同步**渲染,拿回 ESC/POS
-  字节后由前台服务直接写蓝牙。已在平板上验证:后台收到的 shot 不需要把应用切到
-  前台就能出票。
-- **重新打开应用时,过期的打印队列不会再补出一堆积压的票。** 待打印任务超过
-  **3 分钟**会被丢弃而不是补打,超时时间可在打印设置里改;shot 历史本身不受影响。
-- **状态卡上的两个开关在 Android 上真正生效。** 关闭打印后不再自动出票,但数据
-  照收照存;关闭豆子信息后图上那一栏消失。两个选择都会持久化,重启后仍有效。
-- **票面上的机器名正确了。** 大图和缩略图打印走的是 shot JSON,里面没有机器名;
-  服务端现在会补上,不会再出现界面写着 de1xl、票上却是 `UNKNOWN`。
-- **APK 里大图的「存 PNG」「存 JSON」现在真的会保存文件。** WebView 不处理
-  `<a download>`,现在由原生插件把字节写进「下载」目录;大图也补了一个明确的
-  关闭按钮。
-- **APK 里的界面语言选择在刷新后仍然有效**,服务端注入的语言表也真正被用上了。
-  之前那个占位符替换 bug 让切换按钮在浏览器和 APK 里都形同虚设。
-- **「刷新」按钮现在会告诉你它刷完了**,而不是看起来没反应。
-
-### 变更
-
-- `1.0.0` 是第一个稳定版,版本排序在每一个 `1.0.0-beta.N` 之后;beta 用户可以直接
-  覆盖升级。
+- **后台蓝牙打印。** 应用在后台时收到的 shot 现在会在隐藏页面里同步渲染,再由前台
+  服务直接写蓝牙,不再等应用切回前台。隐藏 WebView 的异步事件循环会被冻结,所以新
+  路径刻意不依赖它。
+- **过期的打印队列。** 待打印任务超过 3 分钟(可在打印设置里改)会被丢弃,而不是在
+  应用回来时补出一堆票。
+- **这一版的 Android 修复。** 打印/豆子信息开关真正生效并持久化;票面显示真实机器
+  名;保存 PNG/JSON 会写进「下载」;界面语言选择刷新后仍有效;大图有可用的关闭按钮;
+  刷新会提示完成。
 
 ## 下载
 

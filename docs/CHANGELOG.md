@@ -2,6 +2,25 @@
 
 [中文](CHANGELOG_zh.md) | English
 
+## 1.0.0-beta.5
+
+The release candidate for 1.0.0. It contains the background Bluetooth printing fix,
+the configurable print-queue timeout, and the Android UI fixes; 1.0.0 adds no code
+changes beyond the version number.
+
+### Fixed
+
+- **Background Bluetooth printing.** A shot received while the app is backgrounded is
+  now rendered synchronously and written to Bluetooth by the foreground service, instead
+  of waiting for the app to come forward. The hidden WebView's async event loop is
+  frozen, so the new path deliberately does not use it.
+- **Stale print queue.** Pending jobs older than 3 minutes (configurable in Print
+  settings) are dropped instead of printed in a burst when the app returns.
+- **Android fixes in this build.** The print/bean-info switches now work and persist;
+  receipts show the real machine name; saving PNG/JSON writes into Downloads; the UI
+  language choice survives a reload; the large view has a working close button; Refresh
+  reports completion.
+
 ## 1.0.0
 
 The first stable release of the 1.0 line. The headline is **auto-printing while the
