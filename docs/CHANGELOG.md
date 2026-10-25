@@ -2,6 +2,43 @@
 
 [中文](CHANGELOG_zh.md) | English
 
+## 1.0.0
+
+The first stable release of the 1.0 line. The headline is **auto-printing while the
+Android app is in the background** — the way this app is meant to be used: Decaid in
+front, the tablet waiting behind it.
+
+### Fixed
+
+- **Background Bluetooth printing now works.** Shots received while the app was
+  backgrounded used to sit in the queue until the app came forward. Bluetooth was not
+  the problem: Chromium freezes the hidden WebView's event loop, so the printing code
+  stalled on its first network request and never sent anything. The server now renders
+  the receipt synchronously inside the WebView, receives the ESC/POS bytes, and writes
+  them to Bluetooth from its foreground service. Verified on the tablet with a shot
+  uploaded while the app was in the background.
+- **Old queue entries no longer print in a burst when the app comes back.** Pending
+  jobs older than **3 minutes** are dropped instead of printed as a backlog. The timeout
+  is configurable in Print settings; the shot history is untouched.
+- **The two switches on the status card now work on Android.** Turning printing off
+  stops auto-printing but still stores new shots; turning bean info off removes that
+  column from the chart. Both persist across restarts.
+- **Receipts show the correct machine name.** The large-view and thumbnail print paths
+  read the raw shot JSON, which has no machine name; the server now fills it in, so a
+  receipt no longer says `UNKNOWN` while the UI shows `de1xl`.
+- **Saving a PNG or JSON from the large view works in the APK.** A WebView ignores
+  `<a download>`; the native plugin now writes the bytes into Downloads. The large view
+  also has a real close button.
+- **The UI language choice survives a reload in the APK**, and the server's injected
+  language table is actually used. A placeholder-substitution bug had made the language
+  switch a no-op in both the browser and the APK.
+- **Refresh now reports that it finished**, instead of looking like it did nothing.
+
+### Changed
+
+- `1.0.0` is the first stable release; it sorts after every `1.0.0-beta.N`, so beta
+  users can update in place.
+
 ## 1.0.0-beta.4
 
 The release that makes your shot data yours to keep — export it, restore it — and makes

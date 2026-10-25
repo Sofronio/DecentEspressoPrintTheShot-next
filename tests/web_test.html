@@ -42,6 +42,8 @@
 <h1>PrintTheShot web tests</h1>
 <div id="results"></div>
 <canvas id="off" width="1296" height="576"></canvas>
+<!-- 同一个离屏尺寸,给「关掉豆子信息」那份用 / same offscreen size, for the bean-info-off render -->
+<canvas id="off2" width="1296" height="576"></canvas>
 
 <script src="../web/render.js"></script>
 <script src="../web/printer.js"></script>
@@ -177,6 +179,39 @@
     for (var i = 0; i < data.length; i += 4) if (data[i] < 128) dark++;
     var ratio = dark / (canvas.width * canvas.height);
     check('canvas has ink (0.5%..40%)', ratio > 0.005 && ratio < 0.4, (ratio * 100).toFixed(2) + '%');
+
+    /**
+     * 「禁用豆子信息」开关:关掉之后那一栏画方案信息,而不是空着 —— 所以画出来
+     * 必须和开着的那张**不一样**。这是那颗按钮的全部意义,而它一度只是状态格里
+     * 一个永远 ✅ 的格子。
+     *
+     * The "Disable Bean Info" switch: with it off, that column draws the profile info
+     * instead of going blank, so the render has to **differ** from the one with bean
+     * info on. That is the entire point of the button, which at one point was nothing
+     * but a tile in the status card that always read ✅.
+     */
+    function digest(c) {
+      var d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      var h = 0;
+      for (var i = 0; i < d.length; i += 397) h = (h * 31 + d[i]) | 0;
+      return h;
+    }
+    var canvasOff = document.getElementById('off2');
+    var shotForBean = await P.loadShot(fn, 'zh');
+    var resOn = R.renderShotToCanvas(shotForBean, canvas, { lang: 'zh', machineId: 'DE1-TEST', beanInfo: true, scale: 1 });
+    var resOff = R.renderShotToCanvas(shotForBean, canvasOff, { lang: 'zh', machineId: 'DE1-TEST', beanInfo: false, scale: 1 });
+    check('关掉豆子信息也能出图 / renders with bean info off', resOn.ok && resOff.ok, resOff.error || 'ok');
+    check('关掉豆子信息后那张图不一样 / bean info off changes the chart',
+      digest(canvas) !== digest(canvasOff), digest(canvas) + ' vs ' + digest(canvasOff));
+
+    // 不传这个选项时必须和「开着」逐像素相同 —— 默认值变了就是所有老调用点一起变
+    // Without the option the result has to match "on" pixel for pixel: a changed
+    // default would silently change every existing call site.
+    var canvasDefault = document.createElement('canvas');
+    canvasDefault.width = 1296; canvasDefault.height = 576;
+    R.renderShotToCanvas(shotForBean, canvasDefault, { lang: 'zh', machineId: 'DE1-TEST', scale: 1 });
+    check('不传 beanInfo 时默认画豆子信息 / default keeps bean info',
+      digest(canvasDefault) === digest(canvas), digest(canvasDefault) + ' vs ' + digest(canvas));
 
     // 位图转换 / bitmap conversion
     var bmp = R.canvasToBitmap(canvas, { targetWidth: 576, rotate: true, threshold: 200 });

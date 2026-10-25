@@ -32,7 +32,9 @@
     <div style="margin-top:16px">
       <button class="btn green" id="btn-print" onclick="togglePrint()"></button>
       <button class="btn" id="btn-bean" onclick="toggleBean()"></button>
-      <button class="btn gray" onclick="refreshAll()" id="btn-refresh"></button>
+      <!-- 按钮走 manualRefresh():等刷完并给个回话。refreshAll() 本身不带回话,
+           它还被上传之后的那次自动刷新用着(那里不需要弹提示)。 -->
+      <button class="btn gray" onclick="manualRefresh()" id="btn-refresh"></button>
       <!-- 停止服务。默认隐藏(display:none),由 loadStatus() 按服务端返回的
            show_stop_button 决定是否显示 —— 只有 macOS 打包版需要它,因为只有那种
            情况下用户没有别的停止方式(没 Dock 图标、没窗口、没终端)。
@@ -196,15 +198,25 @@
 <!-- 这里也是 canvas:图是前端现画的,服务端不提供 PNG -->
 <!-- A canvas here too: the chart is drawn on the fly; the server serves no PNG -->
 <div class="lightbox" id="lightbox" onclick="if(event.target===this)closeLightbox()">
-  <span class="close">✕</span>
+  <!-- 这颗 ✕ 以前只是一段文字:**没有 onclick**,点它什么都不会发生(只有点背景
+       才关得掉)。桌面上有 Esc 兜着,平板上没有,于是就是「✕ 是坏的」。
+       This ✕ used to be plain text with **no onclick** — tapping it did nothing
+       (only the backdrop closed the view). A desktop browser has Esc as a way out;
+       a tablet does not, which is what "the ✕ is broken" actually was. -->
+  <span class="close" onclick="closeLightbox()" title="关闭 / close">✕</span>
   <div class="lb-wrap" onclick="event.stopPropagation()">
     <canvas id="lightbox-canvas" width="1296" height="576" alt="large chart"></canvas>
     <div class="lb-langs" id="lb-langs" style="display:flex;gap:6px;flex-wrap:wrap"></div>
     <div class="lb-actions">
       <button class="btn" id="lb-print" onclick="printLightbox()" title="🖨️">🖨️</button>
-      <a class="btn gray" id="lb-json" download title="JSON">📄</a>
+      <!-- 存曲线 / save the curve (the shot JSON) -->
+      <button class="btn gray" id="lb-json" onclick="downloadShotJson(lightboxFilename)" title="JSON">📄</button>
       <button class="btn gray" onclick="downloadShotPng(lightboxFilename)" title="PNG">🖼️</button>
       <button class="btn gray" onclick="translateShot(lightboxFilename)" title="🌐">🌐</button>
+      <!-- 关闭。平板上没有 Esc、点背景也不明显,工具栏里得有一个明摆着的出口。
+           Close. A tablet has no Esc key and "tap the backdrop" is not obvious;
+           the toolbar needs an exit that is plainly one. -->
+      <button class="btn gray" id="lb-close" onclick="closeLightbox()" title="关闭 / close">✕</button>
     </div>
   </div>
 </div>

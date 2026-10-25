@@ -188,6 +188,7 @@ Stored under `settings.print` and editable in the web UI or via the API.
 | `cut` | `true` | send a partial cut; disable on portable units that reject it |
 | `threshold` | `200` | binarisation threshold (luminance above this is white) |
 | `rotate` | `true` | rotate 90° — a receipt is narrower than the chart is wide |
+| `queue_timeout_min` | `3` | pending jobs older than this are dropped instead of printed in a catch-up burst; integer minutes, 1–1440 |
 
 ```bash
 curl http://localhost:8000/api/print/config

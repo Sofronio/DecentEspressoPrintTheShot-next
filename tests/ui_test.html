@@ -94,6 +94,26 @@
     } catch (e) { return -1; }
   }
 
+  /** 等一会儿(重画是异步的)/ wait a while; the redraw is asynchronous. */
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  /**
+   * 一张 canvas 内容的指纹 —— 用来判断「重画了没有、和上一份是不是同一张」。
+   * 采样子集就够了:要的是「两份不一样」,不是密码学强度。
+   *
+   * A fingerprint of a canvas' content, for telling "redrew, and differently" from
+   * "did not change". A sampled subset is plenty: the question is whether two
+   * renders differ, not cryptographic strength.
+   */
+  function digest(canvas) {
+    try {
+      var d = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+      var h = 0;
+      for (var i = 0; i < d.length; i += 397) h = (h * 31 + d[i]) | 0;
+      return h;
+    } catch (e) { return 'unreadable'; }
+  }
+
   /** canvas 是否被画过:白色背景必须已经铺上 / whether the canvas was drawn at all. */
   function isPainted(canvas) {
     try {
@@ -158,6 +178,27 @@
     check('language table carries the new print strings',
       !!(pageL && pageL.print_platform && pageL.h_print),
       pageL ? (pageL.print_platform + '/' + pageL.h_print) : 'no L');
+
+    // ★ 服务端注入的文案表必须**真的被用上**:界面语言要等于服务端当前的语言。
+    //
+    //   这条是那个「占位符还在吗」判断坏掉时的照妖镜。判断坏着的时候,注入的表
+    //   一次也用不上,界面永远跟着**系统语言**走 —— 而故障看上去完全正常:文案
+    //   仍然是「运行中」这样的文字而不是 key,只有语言码对不上服务端。所以这里
+    //   比的不是「有没有文案」,是「哪一份文案」。
+    //
+    // ★ The server-injected table has to be the one actually in use: the UI's language
+    //   must equal the server's current language.
+    //
+    //   This is what catches the broken "is the placeholder still there" test. With it
+    //   broken the injected table is never used and the UI follows the **system**
+    //   language — and nothing looks wrong: the strings are still words ("Running"),
+    //   not keys; only the language code disagrees with the server. So this compares
+    //   *which* table, not whether there is one.
+    var serverLang = '';
+    try { serverLang = ((await (await fetch('/api/language')).json()).language) || ''; } catch (e) { }
+    check('界面语言 = 服务端当前语言(注入的表真的用上了)',
+      !!pageL && !!serverLang && pageL.__code === serverLang,
+      (pageL ? pageL.__code : 'no L') + ' vs server ' + (serverLang || '?'));
 
     // 状态卡片 / status card
     var statusGrid = doc.getElementById('status-grid');
@@ -232,6 +273,83 @@
     // 大图是 canvas / the large view is a canvas
     var lb = doc.getElementById('lightbox-canvas');
     check('lightbox uses a canvas', !!lb, lb ? (lb.width + 'x' + lb.height) : 'missing');
+
+    // ★ 大图的语言 chips:点 en 必须真的换成英文,而且**不该要求配 AI**。
+    //
+    //   这个测试服务端没配 DeepSeek key,所以 POST /api/translate/shot 一定回
+    //   「AI translation not enabled」—— 正是内置语言必须自己重画的那条路(APK
+    //   上则是端点根本不存在,404,走的是同一段兜底)。旧代码在这里弹一个 ❌ 然后
+    //   什么都不换:用户看到的就是「点了 english 没反应」。
+    //
+    // ★ The lightbox language chips: tapping en has to actually switch to English, and
+    //   it must not require AI to be configured.
+    //
+    //   This test server has no DeepSeek key, so POST /api/translate/shot always
+    //   answers "AI translation not enabled" — which is exactly the case where a
+    //   built-in language has to redraw locally (inside the APK the endpoint does not
+    //   exist at all and answers 404, hitting the same fallback). The old code put up a
+    //   ❌ and changed nothing: what the user saw was "tap English, nothing happens".
+    var lbCard = doc.querySelector('#shot-grid canvas[data-fn]');
+    var lbToast = doc.getElementById('toast');
+    if (!lbCard) {
+      check('大图 chips:有卡片可以打开 / a card to open in the lightbox', false, 'no card');
+    } else {
+      // lightboxLang 是页面里的顶层 let,读它得让 iframe 自己 eval;旧版本没有
+      // 这个变量,取不到就当作空字符串,让断言去报「没切过去」而不是把整页炸掉。
+      // lightboxLang is a top-level `let` in the page, so the iframe has to eval it;
+      // older versions have no such variable — read it as an empty string and let the
+      // assertion report "it did not switch" instead of taking the whole page down.
+      var langOf = function () { try { return win.eval('lightboxLang'); } catch (e) { return ''; } };
+
+      lbToast.textContent = '';
+      win.viewImage(lbCard.dataset.fn, 'zh');
+      await sleep(1200);
+      var beforeLang = langOf();
+      var beforeDigest = digest(lb);
+
+      lbToast.textContent = '';
+      win.switchLightboxLang('en');
+      await sleep(1200);
+      var afterLang = langOf();
+      var afterDigest = digest(lb);
+
+      check('大图 chips:切到 en,大图语言跟着变 / the chip switched the large view',
+        beforeLang === 'zh' && afterLang === 'en', beforeLang + ' -> ' + afterLang);
+      check('大图 chips:没配 AI 也不报错 / no error toast, no AI key needed',
+        lbToast.textContent.indexOf('❌') === -1, lbToast.textContent || '(空 / empty)');
+      check('大图 chips:重画成了另一张 / the chart was redrawn, and differently',
+        afterDigest !== beforeDigest && inkRatio(lb) > 0,
+        beforeDigest + ' -> ' + afterDigest + ', ink=' + inkRatio(lb).toFixed(4));
+
+      // ★ 右上角那颗 ✕ 以前是一段**没有 onclick 的文字**:点它什么都不会发生,只有
+      //   点背景才关得掉。桌面上有 Esc 兜着看不出来,平板上没有 —— 用户看到的就是
+      //   「✕ 是坏的」。工具栏里那个关闭按钮是照平板的处境补的。
+      //
+      // ★ The ✕ in the corner used to be plain text with **no onclick**: tapping it did
+      //   nothing, and only the backdrop closed the view. A desktop browser has Esc as a
+      //   way out so it went unnoticed; a tablet does not, which is what "the ✕ is
+      //   broken" was. The toolbar close button exists because a tablet has no Esc.
+      var lbBox = doc.getElementById('lightbox');
+      var lbCloseBtn = doc.getElementById('lb-close');
+      check('大图工具栏有关闭按钮 / the lightbox toolbar has a close button', !!lbCloseBtn);
+
+      win.viewImage(lbCard.dataset.fn, 'zh');
+      await sleep(1200);
+      check('大图能打开 / the large view opens', lbBox.classList.contains('show'), lbBox.className);
+
+      if (lbCloseBtn) lbCloseBtn.click();
+      await sleep(300);
+      check('工具栏的关闭按钮真的关掉了 / the toolbar button closes it',
+        !lbBox.classList.contains('show'), lbBox.className);
+
+      win.viewImage(lbCard.dataset.fn, 'zh');
+      await sleep(1200);
+      var xMark = doc.querySelector('#lightbox .close');
+      if (xMark) xMark.click();
+      await sleep(300);
+      check('右上角的 ✕ 也关得掉 / the ✕ closes it too',
+        !lbBox.classList.contains('show'), lbBox.className);
+    }
 
     // 自动打印轮询有没有起来 / is the auto-print poll running?
     check('auto-print loop started', typeof win.PrintTheShotPrinter.pumpQueue === 'function');

@@ -204,6 +204,40 @@ class ServerTest(unittest.TestCase):
         self.assertIn("print_platform", js, "新增的打印文案应该在语言表里")
         self.assertIn("h_print", js)
 
+    def test_language_switch_changes_the_served_table(self):
+        """
+        切语言之后,服务端发出去的 app.js 必须换成那份语言的文案表 —— 界面语言
+        最终是这里决定的(前端拿到注入的表就用它)。
+
+        这条只看服务端这一半:前端有没有真的用上注入的表,由浏览器测试里的
+        「界面语言 = 服务端当前语言」那条守着。两边都盖上,才知道整条链路是通的。
+
+        Switching the language has to change the table the server sends in app.js:
+        this is what ultimately decides the UI language (the front end uses the
+        injected table when it gets one).
+
+        This covers the server half only. Whether the front end actually uses that
+        table is guarded by the browser test asserting "UI language == the server's
+        current language". Both halves, or the chain is not really covered.
+        """
+        status, _ = http("POST", "/api/language", {"language": "zh"})
+        self.assertEqual(status, 200)
+        try:
+            _, current = http_json("GET", "/api/language")
+            self.assertEqual(current["language"], "zh", "语言设置没生效 / the switch did not stick")
+
+            status, raw = http("GET", "/web/app.js")
+            self.assertEqual(status, 200)
+            js = raw.decode("utf-8")
+            self.assertIn('"__code": "zh"', js, "注入的语言码没跟着切 / the injected code did not follow")
+            self.assertIn("运行中", js, "注入的还是上一份表 / still the previous table")
+            self.assertNotIn("{{LANG}}", js)
+        finally:
+            # 这个类共用同一个服务端进程,不还原的话后面的用例会跑在中文里
+            # The class shares one server process; without restoring, later cases
+            # would run against a Chinese server.
+            http("POST", "/api/language", {"language": "en"})
+
     def test_static_assets_resolve(self):
         """页面引用的每个静态资源都必须真的能取到 / every referenced asset must resolve."""
         for path, expect_type in (
@@ -493,15 +527,142 @@ class ServerTest(unittest.TestCase):
     def test_print_config_round_trip(self):
         status, j = http_json("GET", "/api/print/config")
         self.assertEqual(status, 200)
-        for key in ("printer", "mode", "print_width", "threshold", "rotate", "platform"):
+        for key in ("printer", "mode", "print_width", "threshold", "rotate",
+                    "platform", "queue_timeout_min"):
             self.assertIn(key, j)
+        self.assertEqual(j["queue_timeout_min"], 3,
+                         "队列超时默认 3 分钟 / the queue timeout defaults to 3 minutes")
 
         status, saved = http_json("POST", "/api/print/config", {"print_width": 512})
         self.assertTrue(saved["success"])
         self.assertEqual(saved["config"]["print_width"], 512)
 
-        # 改回来,免得影响别的测试 / restore so other tests are unaffected
-        http_json("POST", "/api/print/config", {"print_width": 576})
+        # 队列超时也走这份配置,并且必须被校验 —— 0 会让所有待打印任务立刻过期,
+        # 静默存下去只会表现为「怎么不打了」。
+        #
+        # The queue timeout rides on this config and must be validated: zero would
+        # expire every pending job immediately, and storing it silently would only
+        # show up as "nothing prints any more".
+        status, saved = http_json("POST", "/api/print/config", {"queue_timeout_min": 5})
+        self.assertTrue(saved["success"])
+        self.assertEqual(saved["config"]["queue_timeout_min"], 5)
+
+        status, bad = http_json("POST", "/api/print/config", {"queue_timeout_min": 0})
+        self.assertEqual(status, 400, "非法超时必须被拒绝 / an invalid timeout must be rejected")
+        self.assertFalse(bad["success"])
+        _, after = http_json("GET", "/api/print/config")
+        self.assertEqual(after["queue_timeout_min"], 5,
+                         "被拒绝的值不能写进去 / a rejected value must not stick")
+
+        # 改回来,免得影响别的测试(超时也是这里恢复)
+        # Restore so other tests are unaffected (including the timeout).
+        http_json("POST", "/api/print/config", {"print_width": 576, "queue_timeout_min": 3})
+
+    def test_queue_timeout_drops_expired_jobs(self):
+        """
+        入队超过超时时间的任务要从队列里真正删掉,而不是只在这一轮返回时过滤 ——
+        否则它还会占着 MAX_PENDING、挡着同内容的新上传。没到期的和没有时间戳的
+        任务必须留着。
+
+        时间用 now= 直接驱动,理由和 test_dedupe_window_expires 一样:判定逻辑在
+        服务端进程里,测试跑在另一个进程,跨进程只能靠墙钟 —— 要么等 3 分钟,
+        要么就是飘忽的测试。
+
+        Expired jobs must be removed for real, not merely filtered out of one
+        response — otherwise they keep occupying MAX_PENDING and block a fresh
+        upload of the same content. Jobs inside the window, and jobs without a
+        timestamp, must stay.
+
+        Time is driven through now= for the same reason as test_dedupe_window_expires:
+        the decision runs inside the server process and the test lives in another,
+        so crossing that boundary means either a 3-minute wall-clock wait or a flaky
+        test.
+        """
+        sys.path.insert(0, ROOT)
+        import print_the_shot_server as m
+
+        saved_timeout = m.settings.get("print", {}).get("queue_timeout_min")
+        m.settings.setdefault("print", {})["queue_timeout_min"] = 3
+        base = 10_000.0
+        try:
+            m.printed_at.clear()
+            m.pending_prints[:] = [
+                # 整 3 分钟前:过期 / exactly at the boundary: expired
+                {"filename": "expired.json", "hash": "timeout-expired",
+                 "queued_at": base, "attempts": 0},
+                # 179 秒前:还在窗口内 / 179 seconds old: still inside the window
+                {"filename": "fresh.json", "hash": "timeout-fresh",
+                 "queued_at": base + 1, "attempts": 0},
+                # 没有时间戳:无法定龄,保守留着 / no timestamp: cannot age it, keep it
+                {"filename": "ageless.json", "hash": "timeout-ageless", "attempts": 0},
+            ]
+
+            names = {j["filename"] for j in m.take_pending_prints(now=base + 180)}
+            self.assertNotIn("expired.json", names,
+                             "超时任务不该再被取走 / an expired job must not be claimed")
+            self.assertIn("fresh.json", names,
+                          "窗口内的任务要留着 / a job inside the window stays")
+            self.assertIn("ageless.json", names,
+                          "没有时间戳的任务不该被丢 / a job without a timestamp is kept")
+
+            with m.pending_lock:
+                remaining = {j["filename"] for j in m.pending_prints}
+            self.assertEqual(remaining, {"fresh.json", "ageless.json"},
+                             "过期任务要真正删除,而不是只过滤返回值 / removed, not just hidden")
+        finally:
+            m.pending_prints.clear()
+            m.printed_at.clear()
+            if saved_timeout is None:
+                m.settings.get("print", {}).pop("queue_timeout_min", None)
+            else:
+                m.settings.setdefault("print", {})["queue_timeout_min"] = saved_timeout
+
+    def test_shot_detail_carries_the_machine_name(self):
+        """
+        图左下角要印机器名,而机器名只存在于服务端的索引里 —— 上传的 JSON 里没有
+        这个字段。所以 /api/shot 得把它补进返回的数据,否则从大图打印出来就是
+        「机器: UNKNOWN」,而列表里同一条明明写着机器名。
+
+        The chart prints the machine name bottom-left, and the name lives only in the
+        server's index — the uploaded JSON has no such field. So /api/shot has to fill
+        it into what it returns; otherwise printing from the large view says
+        "机器: UNKNOWN" while the list shows the machine name for the same shot.
+        """
+        filename = self._upload_one(unique=True)
+        status, j = http_json("GET", "/api/shot?file=" + filename)
+        self.assertEqual(status, 200)
+        self.assertEqual(j["shot"].get("machine_id"), "TEST-RIG")
+
+    def test_the_two_switches_reach_the_print_config(self):
+        """
+        界面上「禁用打印」「禁用豆子信息」两个开关,必须出现在打印配置里 ——
+        前端打印那条路(printer.js)读的就是这份配置,而「豆子信息画不画」是画图
+        参数。配置里没有它,纸上那张图就会和屏幕上那张不一致。
+
+        Both switches on the status card have to appear in the print config: the
+        printing path in printer.js reads this document, and "does the chart draw bean
+        info" is a rendering parameter. Without it the paper and the screen disagree.
+        """
+        status, j = http_json("GET", "/api/print/config")
+        self.assertEqual(status, 200)
+        self.assertIs(j.get("print_enabled"), True)
+        self.assertIs(j.get("bean_info_enabled"), True)
+
+        try:
+            status, off = http_json("POST", "/api/settings/beaninfo", {"enabled": False})
+            self.assertEqual(status, 200)
+            self.assertTrue(off["success"])
+            self.assertFalse(off["bean_info_enabled"])
+
+            _, j2 = http_json("GET", "/api/print/config")
+            self.assertIs(j2.get("bean_info_enabled"), False, "关掉之后配置里还是开着的 / the config still says on")
+
+            # 状态格读的是 /api/status,两个地方必须是同一个值
+            # The status card reads /api/status; the two must agree.
+            _, st = http_json("GET", "/api/status")
+            self.assertIs(st.get("bean_info_enabled"), False)
+        finally:
+            http_json("POST", "/api/settings/beaninfo", {"enabled": True})
 
     def test_print_rejects_a_malformed_body(self):
         """错误的输入必须在入口就被挡住,不能一路走到打印机才出问题。"""

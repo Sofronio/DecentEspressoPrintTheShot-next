@@ -6,10 +6,12 @@
  * 这里直接 JSON.parse,占位符还在时第一行就抛 SyntaxError,整个脚本加载失败,
  * 界面白屏且没有任何看得见的报错。
  *
- * 所以这里做了三件事:
+ * 所以这里做了四件事:
  *   1. 只要占位符没被替换(还是 {{LANG}}),就当作「没有服务端文案」;
  *   2. 空对象也算没有 —— 某些打包路径会把占位符换成 {} 而不是报错;
- *   3. 兜底用 web/strings.js 里自带的那份,它和界面一起打包,永远在。
+ *   3. 兜底用 web/strings.js 里自带的那份,它和界面一起打包,永远在;
+ *   4. 占位符本身在运行时拼出来 —— 服务端会把页面里每一处 {{LANG}} 都换掉,
+ *      连判断用的那处也换,写死的话这个判断永远为假(详见函数里的注释)。
  *
  * The server substitutes {{LANG}} with a JSON object literal. **On Android nobody
  * substitutes it** — files inside the APK are copied verbatim and the placeholder
@@ -17,26 +19,86 @@
  * present it threw a SyntaxError on the very first line, the whole script failed to
  * load, and the UI went blank with no visible error.
  *
- * Hence three things:
+ * Hence four things:
  *   1. a surviving {{LANG}} means "no server strings";
  *   2. an empty object counts as none too — some packaging paths substitute {} rather
  *      than failing;
  *   3. fall back to the copy in web/strings.js, which ships with the UI and is always
- *      there.
+ *      there;
+ *   4. the placeholder itself is built at run time: the server rewrites every {{LANG}}
+ *      in the page, the test for it included, so a literal one makes that test
+ *      permanently false (see the comment inside).
  */
+
+// 记住用户选的界面语言 / remember the chosen UI language.
+//
+// 只在「服务端没注入文案表」时才被读到(见 resolveStrings)—— 桌面浏览器里
+// 服务端那份为准,这份记忆不会跟它抢。
+//
+// 为什么要有它:APK 里没有任何服务端参与出页面,点完 English 一刷新,挑语言的
+// 依据只剩系统语言,于是又变回中文 —— 用户看到的就是「点了没反应」。
+//
+// Read only when the server did not inject a table (see resolveStrings), so on a
+// desktop browser the server's table wins and this record never argues with it.
+//
+// Why it exists: inside the APK nothing server-side renders the page, so after a
+// reload the only thing left to pick a language by was the system language — the UI
+// went back to Chinese and the tap looked like it had done nothing.
+const LANG_KEY = 'pts_lang';
+function savedLang() {
+  try { return localStorage.getItem(LANG_KEY) || ''; } catch (e) { return ''; }
+}
+function rememberLang(code) {
+  // 存不进去也不是错误(隐私模式、存储被禁用):这次切换仍然生效,只是下次
+  // 打开会退回系统语言。
+  // Failing to store is not an error (private mode, storage disabled): the switch
+  // still applies now, it just will not survive to the next launch.
+  try { localStorage.setItem(LANG_KEY, code); } catch (e) { /* 忽略 / ignore */ }
+}
+
 function resolveStrings() {
   const builtin = window.PTS_STRINGS || { en: {}, zh: {} };
-  // 打包进 APK 时,用系统语言挑一份兜底;挑不到就用英文
-  // Inside the APK, pick a fallback by system language; English if nothing matches
+  // 没有服务端文案时(打包进 APK)挑一份兜底:先看用户上次选的,再按系统语言,
+  // 都没有就用英文。
+  //
+  // 「上次选的」为什么必须存:APK 里没有任何服务端参与发页面,这份记忆是界面
+  // 语言唯一的落脚点。不存的话,点了 English、页面一刷新又回到系统语言,按钮
+  // 看着就像坏的 —— 而它确实什么也没做。
+  //
+  // With no server table (the APK), pick a fallback: the user's last choice, then
+  // the system language, then English.
+  //
+  // Why the stored choice has to exist: nothing server-side renders the APK's UI,
+  // so this is the only place the choice can live. Without it, tapping English and
+  // reloading lands back on the system language and the button reads as broken —
+  // which, until this was fixed, it was.
+  const saved = savedLang();
   const sys = (navigator.language || 'en').toLowerCase();
-  const guess = sys.startsWith('zh') ? 'zh' : 'en';
+  const guess = (saved && builtin[saved]) ? saved : (sys.startsWith('zh') ? 'zh' : 'en');
   let injected = null;
 
   try {
+    // 占位符在**运行时**拼出来,不写成字面量。
+    //
+    // 服务端替换的是页面里**每一处** {{LANG}},包括下面 indexOf 的实参。写成
+    // 字面量的话:raw 装的是那段 JSON,要找的也是同一段 JSON,indexOf 返回 0
+    // 而不是 -1,于是永远判定成「没人替换过」—— 下面的 JSON.parse 一次也不执行,
+    // 服务端注入的文案表从来没被用上,界面语言永远跟着系统语言走(浏览器里也
+    // 一样,不只是 APK)。右上角的切换按钮点了等于没点。
+    //
+    // Build the placeholder at run time rather than as a literal.
+    //
+    // The server replaces **every** {{LANG}} in the page, including the argument to
+    // indexOf below. As a literal, raw holds that JSON and the search is the very
+    // same JSON, so indexOf returns 0 rather than -1 and the code always concludes
+    // "nobody substituted": the parse never runs, the server's table is never used,
+    // and the UI follows the system language forever — in a browser too, not just
+    // in the APK. The switch button does nothing at all.
+    const placeholder = '{' + '{LANG}}';
     const raw = '{{LANG}}';
     // 占位符还在 = 没人替换过 = 打包进 APK 的那条路径
     // The placeholder is still there, so nobody substituted it: the APK path
-    if (raw.indexOf('{{LANG}}') === -1) {
+    if (raw.indexOf(placeholder) === -1) {
       const parsed = JSON.parse(raw.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#39;/g, "'"));
       if (parsed && Object.keys(parsed).length > 0) injected = parsed;
     }
@@ -205,7 +267,9 @@ async function doTranslate() {
   // used to fetch a freshly rendered PNG from the server; now it is a local
   // redraw with nothing to wait for.
   PrintTheShotPrinter.clearShotCache(pendingTranslateFn);
-  viewImage(pendingTranslateFn);
+  // 大图直接开在刚翻好的那份语言上,不用再点一次 chips
+  // Open the large view straight in the language just produced, no extra chip tap.
+  viewImage(pendingTranslateFn, lang);
   loadShots();
 }
 
@@ -252,9 +316,17 @@ function url(path) {
 // the two are rendered separately; no reason to fetch it twice.
 let lastStatus = null;
 
+// 图上的豆子信息栏画不画 —— 界面那颗「禁用豆子信息」开关。由 /api/status 喂,
+// 每次 loadStatus 都同步一遍,所以别处只要重画就会跟上。
+//
+// Whether the chart draws the bean-info column: the "Disable Bean Info" switch.
+// Fed by /api/status on every loadStatus, so anything that redraws picks it up.
+let beanInfoEnabled = true;
+
 async function loadStatus() {
   const s = await api('/api/status');
   lastStatus = s;
+  beanInfoEnabled = s.bean_info_enabled !== false;
   document.getElementById('subtitle').textContent = `${T('status_running')} · v${s.version}`;
   const items = [
     [T('status_running'), s.status, ''],
@@ -458,7 +530,10 @@ async function loadShots() {
         <div class="meta"><b>${(s.bean ? s.bean + ' - ' : '') + (s.profile || '?')}</b>${s.machine_id} · ${s.timestamp} · ${(s.data_size/1024).toFixed(1)}KB</div>
         <div class="actions">
           <button class="btn" onclick="printShot('${s.filename}', '${s.machine_id || ''}')" title="${T('print')}">🖨️</button>
-          <a class="btn gray" href="${url('/download/json/' + s.filename)}" download title="JSON">📄</a>
+          <!-- 存曲线也走 downloadShotJson():平板上 <a download> 不会保存文件 -->
+          <!-- saving the curve goes through downloadShotJson() too: on a tablet an
+               <a download> saves nothing -->
+          <button class="btn gray" onclick="downloadShotJson('${s.filename}')" title="JSON">📄</button>
           <button class="btn gray" onclick="downloadShotPng('${s.filename}')" title="PNG">🖼️</button>
           <button class="btn gray" onclick="translateShot('${s.filename}')" title="${T('btn_translate')}">🌐</button>
         </div>
@@ -597,7 +672,8 @@ async function drawThumb(canvas) {
   const filename = canvas.dataset.fn;
   try {
     const shot = await PrintTheShotPrinter.loadShot(filename, currentLang);
-    const res = PrintTheShotRender.renderShotToCanvas(shot, canvas, { lang: currentLang, scale: 1 });
+    const res = PrintTheShotRender.renderShotToCanvas(shot, canvas, {
+      lang: currentLang, beanInfo: beanInfoEnabled, scale: 1 });
     if (!res.ok) throw new Error(res.error);
     canvas.classList.add('ready');
   } catch (err) {
@@ -631,10 +707,53 @@ async function printShot(filename, machineId) {
   }
 }
 
+/**
+ * 把一份内容交给用户 —— 平板上由原生写进「下载」目录,浏览器里走普通下载。
+ *
+ * 为什么两边不一样:WebView 不处理 `<a download>`,点了不会保存;交给系统浏览器
+ * 又自相矛盾(浏览器一起来本 App 就退到后台,而文件要从本 App 自己的服务端取,
+ * 提供文件的那一端正好被冻住)。所以平板这条路必须由原生把字节写出去。
+ *
+ * Hand a file to the user: on the tablet the native side writes it into Downloads, in
+ * a browser it is an ordinary download.
+ *
+ * Why they differ: a WebView does not act on `<a download>` — nothing is saved — and
+ * handing it to the system browser fails for the reason spelled out in exportBackup
+ * (the app goes to the background right as the file is being served by the app
+ * itself). On the tablet the bytes have to be written out natively.
+ *
+ * @param name      存下来的文件名 / the filename to save as
+ * @param mime      内容类型 / content type
+ * @param dataUrl   data: URL(浏览器里可以直接用)/ a data: URL (browsers can use it)
+ * @param href      浏览器里改用这个地址下载(JSON 用服务端那条链接)
+ *                  browsers download from this instead (the server link, for JSON)
+ */
+async function saveOrDownload(name, mime, dataUrl, href) {
+  const native = window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.PrintTheShotPrinter;
+  if (native && native.saveFile) {
+    const base64 = String(dataUrl).split(',')[1] || '';
+    const r = await native.saveFile({ name: name, mime: mime, base64: base64 });
+    toast('✅ ' + ((r && r.message) || name));
+    return;
+  }
+  const a = document.createElement('a');
+  a.download = name;
+  a.href = href || dataUrl;
+  document.body.appendChild(a);   // 有的浏览器要求元素在文档里才认这次点击
+  a.click();
+  a.remove();
+}
+
 /** 把一条 shot 画出来另存为 PNG(服务端不再生成 PNG,由前端导出)。 */
 async function downloadShotPng(filename) {
   try {
-    const bitmap = await PrintTheShotPrinter.shotToBitmap(filename, { rotate: false, lang: currentLang });
+    // 存下来的就是屏幕上这一份:大图换过语言就存那种语言,豆子信息开关也跟它走
+    // Save what is on screen: the lightbox's language, and the bean-info switch.
+    const bitmap = await PrintTheShotPrinter.shotToBitmap(filename, {
+      rotate: false,
+      lang: lightboxLang || currentLang,
+      beanInfo: beanInfoEnabled,
+    });
     // 用一张临时 canvas 把 1-bit 数据还原成可下载的 PNG
     // Rebuild the 1-bit data into a temporary canvas so it can be saved as a PNG
     const c = document.createElement('canvas');
@@ -652,10 +771,40 @@ async function downloadShotPng(filename) {
       }
     }
     ctx.putImageData(img, 0, 0);
-    const a = document.createElement('a');
-    a.download = filename.replace('.json', '.png');
-    a.href = c.toDataURL('image/png');
-    a.click();
+    await saveOrDownload(filename.replace('.json', '.png'), 'image/png', c.toDataURL('image/png'));
+  } catch (e) {
+    toast('❌ ' + (e.message || e));
+  }
+}
+
+/**
+ * 存这条曲线 —— 就是上传的那份原始 JSON。
+ *
+ * 浏览器里直接走服务端那条下载链接(它带着 Content-Disposition);平板上得先把
+ * 内容取回来,再交给原生写文件。两条路拿到的都是同一个文件。
+ *
+ * Save the curve: the raw JSON that was uploaded.
+ *
+ * A browser uses the server's download link directly (it sets Content-Disposition);
+ * on the tablet the content is fetched first and handed to the native writer. Both
+ * end up with the same file.
+ */
+async function downloadShotJson(filename) {
+  const name = filename.replace(/\.json$/, '') + '.json';
+  try {
+    const native = window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.PrintTheShotPrinter;
+    if (native && native.saveFile) {
+      const blob = await (await fetch(url('/download/json/' + encodeURIComponent(filename)))).blob();
+      const dataUrl = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result);
+        fr.onerror = () => rej(new Error('read failed'));
+        fr.readAsDataURL(blob);
+      });
+      await saveOrDownload(name, 'application/json', dataUrl);
+      return;
+    }
+    await saveOrDownload(name, 'application/json', '', url('/download/json/' + encodeURIComponent(filename)));
   } catch (e) {
     toast('❌ ' + (e.message || e));
   }
@@ -665,14 +814,35 @@ async function downloadShotPng(filename) {
 // 点击缩略图查看大图(不再触发打印) / click a thumbnail for the large view
 
 let lightboxFilename = '';
+// 大图自己的语言。默认跟界面语言一致,用 chips 换过之后就不再跟了 —— 屏幕上
+// 显示的是哪一种,chips 高亮的就是哪一种,打印也跟着它走。
+//
+// The large view's own language. It starts out as the UI language and stops
+// following it once a chip is used: whichever language is on screen is the one
+// highlighted, and the one printing uses.
+let lightboxLang = '';
 
-async function viewImage(filename) {
+/**
+ * 本地有没有这份语言的文案表 / is this language's table available locally?
+ *
+ * 内置的 en / zh 有(它们在 strings.js 里,和界面一起打包);AI 加出来的自定义
+ * 语言没有 —— 那份表在服务端。大图语言 chips 靠这个决定要不要问服务端。
+ *
+ * Built-in en / zh are here (they live in strings.js and ship with the UI); custom
+ * AI-added languages are not — that table lives on the server. The lightbox language
+ * chips use this to decide whether the server is needed at all.
+ */
+function hasLocalStrings(lang) {
+  return !!(window.PTS_STRINGS && window.PTS_STRINGS[lang]);
+}
+
+async function viewImage(filename, lang) {
   lightboxFilename = filename;
   const canvas = document.getElementById('lightbox-canvas');
-  document.getElementById('lb-json').href = url('/download/json/' + filename);
   // 语言chips:切换大图到其它语言 / language chips: switch the large view
   const langs = L.__languages || [{code:'en',name:'English'},{code:'zh',name:'中文'}];
-  const cur = currentLang;
+  const cur = lang || lightboxLang || currentLang;
+  lightboxLang = cur;
   document.getElementById('lb-langs').innerHTML = langs.map(l =>
     `<button class="btn gray" style="padding:3px 10px;font-size:12px${l.code === cur ? ';background:var(--accent);color:#fff' : ''}"
       onclick="switchLightboxLang('${l.code}')">${l.name}</button>`).join('');
@@ -680,24 +850,57 @@ async function viewImage(filename) {
 
   try {
     const shot = await PrintTheShotPrinter.loadShot(filename, cur);
-    const res = PrintTheShotRender.renderShotToCanvas(shot, canvas, { lang: cur, scale: 1 });
+    const res = PrintTheShotRender.renderShotToCanvas(shot, canvas, {
+      lang: cur, beanInfo: beanInfoEnabled, scale: 1 });
     if (!res.ok) throw new Error(res.error);
   } catch (e) {
     toast('❌ ' + (e.message || e));
   }
 }
 
-// 大图切换语言:渲染在本地发生,数据换一份重画即可,不用等服务端出图。
-// Switching language re-renders locally from freshly loaded data — no waiting on
-// the server to produce an image.
+/**
+ * 大图切换语言 / switch the large view's language.
+ *
+ * 渲染在本地发生,数据换一份重画即可,不用等服务端出图。
+ *
+ * 服务端只负责一件事:把**豆子信息、方案名**这些用户数据翻成目标语言(而且只
+ * 用缓存,allow_api=false,不调 AI)。图上那些文案 —— 压力、流速、温度、时间
+ * —— 本来就是内置的中英文两份,跟服务端没关系。
+ *
+ * 所以服务端不干这条活的时候(en / zh 这两条路以前会遇到的两种情况:桌面端没配
+ * AI key,服务端回「AI translation not enabled」;APK 里压根没实现这个端点,
+ * 回 404),内置语言就本地重画 —— 用户只是想换个语言看图,不该被 AI 配置挡住。
+ * 自定义语言仍然必须问服务端:那份文案表不在本机,本地画不出来。
+ *
+ * Rendering happens locally: swap the data and redraw, no waiting on the server to
+ * produce an image.
+ *
+ * The server has exactly one job here: translating **user data** — bean info, profile
+ * names — into the target language, and from cache only (allow_api=false, no AI call).
+ * The on-chart labels — pressure, flow, temperature, time — are built in twice over
+ * and have nothing to do with the server.
+ *
+ * So when the server will not do that job — the two cases en/zh used to hit: a desktop
+ * with no AI key answers "AI translation not enabled", and inside the APK the endpoint
+ * is not implemented at all and answers 404 — built-in languages redraw locally. The
+ * user wanted to look at the chart in another language; an AI configuration should not
+ * stand in the way. Custom languages still have to go through the server: their table
+ * is not on this machine.
+ */
 async function switchLightboxLang(lang) {
   if (!lightboxFilename) return;
   const r = await api('/api/translate/shot', { method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({filename: lightboxFilename, lang: lang, allow_api: false}) })
     .catch(e => ({ success: false, message: String(e) }));
-  if (!r.success) { toast('❌ ' + (r.message || '')); return; }
+  if (!r.success && !hasLocalStrings(lang)) { toast('❌ ' + (r.message || '')); return; }
   PrintTheShotPrinter.clearShotCache(lightboxFilename);
-  viewImage(lightboxFilename);
+  // 传 lang:切的是这张图的语言,不是界面语言 —— 以前不传,于是豆子信息翻了、
+  // 图上的文案还留在界面语言那套,点哪个 chip 看着都只变一半。
+  //
+  // Pass lang: what changed is this chart's language, not the UI's. It used to be
+  // omitted, so the bean info switched while the chart labels stayed in the UI
+  // language — every chip looked like it only half worked.
+  viewImage(lightboxFilename, lang);
 }
 
 function closeLightbox() {
@@ -705,9 +908,16 @@ function closeLightbox() {
 }
 
 // 大图操作栏:打印 / print the shot shown in the lightbox
+//
+// 打屏幕上这一份:大图用 chips 换过语言的话,打印也跟着换 —— 看着英文、打出来
+// 中文是最容易让人怀疑「是不是打错了」的一种不一致。
+//
+// Print what is on screen: if a chip switched the large view, the print follows.
+// Seeing English and getting a Chinese receipt is the kind of mismatch that makes
+// people think the printer is broken.
 async function printLightbox() {
   if (!lightboxFilename) return;
-  const r = await PrintTheShotPrinter.printShot(lightboxFilename, { lang: currentLang });
+  const r = await PrintTheShotPrinter.printShot(lightboxFilename, { lang: lightboxLang || currentLang });
   toast(r.success ? (T('print_job_sent') + ' · ' + r.via) : ('❌ ' + r.message));
 }
 
@@ -766,15 +976,56 @@ async function stopService() {
     + '</div>';
 }
 
+/**
+ * 两个开关的共用部分:读当前状态 → 反过来写回去 → 如实报错。
+ *
+ * 以前这里不看响应、也不管成败:服务端回 404(Android 上这个端点本来就没有)
+ * 时,按钮文字不变、没有任何提示,用户看到的就是「按钮是坏的」。失败必须出声。
+ *
+ * Shared by both switches: read the current state, write the opposite back, and
+ * report failures honestly.
+ *
+ * This used to ignore the response entirely: with a 404 from the server (the
+ * endpoint did not exist on Android at all) the button label stayed put and nothing
+ * was said — which is exactly what "the button is broken" looks like from outside.
+ */
+async function flipSetting(path, current, label) {
+  const r = await api(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: !current }),
+  }).catch(e => ({ success: false, message: String(e) }));
+  if (!r.success) { toast('❌ ' + (r.message || '')); return false; }
+  toast(label + ' ✓');
+  return true;
+}
+
 async function togglePrint() {
   const s = await api('/api/status');
-  await api('/api/settings/print', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({enabled: !s.print_enabled}) });
-  loadStatus();
+  // 关掉只停「收到新数据自动打印」,手动打印照旧 —— 桌面端一直是这个语义,
+  // 这里跟它保持一致(见服务端 /api/settings/print 的注释)。
+  //
+  // Off means "stop auto-printing new arrivals"; the manual print button still
+  // prints. The desktop has always worked this way and this matches it.
+  const done = current => current ? T('disable_print') : T('enable_print');
+  if (await flipSetting('/api/settings/print', s.print_enabled, done(s.print_enabled))) loadStatus();
 }
 
 async function toggleBean() {
   const s = await api('/api/status');
-  await api('/api/settings/beaninfo', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({enabled: !s.bean_info_enabled}) });
+  const done = current => current ? T('disable_bean_info') : T('enable_bean_info');
+  if (!await flipSetting('/api/settings/beaninfo', s.bean_info_enabled, done(s.bean_info_enabled))) return;
+  // 图上那一栏要跟着变。缩略图和大图都是从数据现画的,重画一遍就生效 ——
+  // 不重画的话开关按下去屏幕上没有任何变化,和「按钮坏了」没区别。
+  //
+  // The chart's column has to follow. Thumbnails and the large view are redrawn
+  // from data every time, so a redraw is all it takes; without one nothing on
+  // screen changes and the switch is indistinguishable from a broken button.
+  loadShots();
+  if (lightboxFilename) viewImage(lightboxFilename);
+  // 打印那条路读的是打印配置里的同一个开关,把那份缓存也作废,免得下次打印还用旧值
+  // The printing path reads the same switch out of the print config; drop that cached
+  // copy so the next print does not use the old value.
+  PrintTheShotPrinter.getConfig(true);
   loadStatus();
 }
 
@@ -1074,12 +1325,67 @@ async function updateService() {
 function showSettings() { document.getElementById('main-view').style.display = 'none'; document.getElementById('settings-view').style.display = 'block'; }
 function hideSettings() { document.getElementById('settings-view').style.display = 'none'; document.getElementById('main-view').style.display = 'block'; }
 
+/**
+ * 切换界面语言 / switch the UI language.
+ *
+ * 两件事,顺序不能反:
+ *   1. 先记在本机 —— 重载之后是它决定界面用哪种语言(APK 里没有别人决定);
+ *   2. 再告诉服务端 —— 桌面浏览器那条路上,服务端注入的文案表才是准的。
+ *
+ * 重载放在最后**且不受前一步成败影响**:APK 里的 /api/language 不是真在记语言
+ * (那边返回的是一句「此端未实现」式的固定值),POST 失败或者超时都不能把重载
+ * 一起吃掉 —— 那样按钮就真的什么也不做了。
+ *
+ * Two things, and the order matters:
+ *   1. record it locally first — after the reload that is what picks the language
+ *      (inside the APK nothing else will);
+ *   2. then tell the server — on the desktop path the table the server injects is
+ *      the one that counts.
+ *
+ * The reload happens last and does not depend on that call succeeding: /api/language
+ * on Android does not really record anything (it answers with a fixed value), and a
+ * failed or slow POST must not swallow the reload — that is exactly how the button
+ * ends up doing nothing at all.
+ */
 async function setLang(lang) {
-  await api('/api/language', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({language: lang}) });
+  rememberLang(lang);
+  try {
+    await api('/api/language', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({language: lang}) });
+  } catch (e) {
+    console.warn('PrintTheShot: the server did not accept the language change', e);
+  }
   location.reload();
 }
 
 function refreshAll() { loadStatus(); loadQueue(); loadShots(); loadStats(); }
+
+/**
+ * 「刷新」按钮。和 refreshAll() 的区别只有两点:等它真的刷完,然后给个回话。
+ *
+ * 为什么要有回话:页面本来就每 8 秒自己刷一次,数据没变时点这颗按钮屏幕上什么
+ * 都不会动 —— 它一直在工作,看起来却像坏的。**等**也是必须的:不 await 就直接
+ * 报「已刷新」,那和以前一样是在说一件没验证过的事。
+ *
+ * The Refresh button. Two differences from refreshAll(): it waits for the reload to
+ * finish, and it says so.
+ *
+ * Why the acknowledgement: the page refreshes itself every 8 seconds anyway, so with
+ * unchanged data pressing this button moves nothing on screen — it works the whole
+ * time and still reads as broken. The wait matters too: claiming "refreshed" without
+ * awaiting the reload is asserting something that was never checked.
+ */
+async function manualRefresh() {
+  const btn = document.getElementById('btn-refresh');
+  if (btn) btn.disabled = true;
+  try {
+    await Promise.all([loadStatus(), loadQueue(), loadShots(), loadStats()]);
+    toast(T('refresh') + ' ✓');
+  } catch (e) {
+    toast('❌ ' + (e.message || e));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 
 // 拖放上传
 const dz = document.getElementById('dropzone');
@@ -1315,6 +1621,17 @@ async function initPrintSettings() {
     ['bmp', 'bmp (legacy)']
   ];
 
+  // 队列超时:超时的待打印任务会被服务端丢掉,不会在下次打开时补打。
+  // 常用值做成下拉;后端若存了别的值,也把它补进列表,免得下拉选不中。
+  //
+  // Queue timeout: the server drops pending jobs older than this instead of
+  // printing them when the UI comes back. Common values are listed; a custom
+  // value from the server is added too, so the drop-down never shows nothing.
+  const timeoutMin = Number(cfg.queue_timeout_min) || 3;
+  const timeoutOptions = [1, 3, 5, 10, 30, 60];
+  if (timeoutOptions.indexOf(timeoutMin) === -1) timeoutOptions.push(timeoutMin);
+  timeoutOptions.sort((a, b) => a - b);
+
   card.innerHTML = `
     <div class="stat"><div class="label">${T('print_platform')}</div>
       <div class="value ${cfg.available ? 'ok' : 'off'}">${cfg.platform_name || cfg.platform}${cfg.available ? '' : ' ⚠️'}</div></div>
@@ -1336,6 +1653,12 @@ async function initPrintSettings() {
       <div class="value">
         <select id="print-width" onchange="savePrintSetting('print_width', parseInt(this.value,10))" style="font-size:12px">
           ${[576, 512, 384].map(w => `<option value="${w}" ${cfg.print_width === w ? 'selected' : ''}>${w} dots</option>`).join('')}
+        </select>
+      </div></div>
+    <div class="stat"><div class="label">${T('queue_timeout')}</div>
+      <div class="value">
+        <select id="queue-timeout" onchange="savePrintSetting('queue_timeout_min', parseInt(this.value,10))" style="font-size:12px">
+          ${timeoutOptions.map(m => `<option value="${m}" ${timeoutMin === m ? 'selected' : ''}>${m} ${T('min_unit')}</option>`).join('')}
         </select>
       </div></div>
   `;

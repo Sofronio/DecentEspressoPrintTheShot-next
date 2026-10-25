@@ -57,7 +57,88 @@ public final class ServerHolder {
      */
     private static volatile Runnable wakeWebView;
 
+    /**
+     * 后台打印入口,由 MainActivity 注册 / the background-print hook, registered by
+     * MainActivity.
+     *
+     * 为什么不复用 wakeWebView:那条路是异步的(前端 fetch → 渲染 → 插件),
+     * 而隐藏页面的事件循环会被冻结,只有 evaluateJavascript 的同步片段能跑。
+     * 后台打印需要一次同步渲染 + 原生写蓝牙,所以单独一条路。
+     *
+     * Why this is not wakeWebView: that path is asynchronous (front-end fetch →
+     * render → plugin), and a hidden page's event loop is frozen; only the
+     * synchronous slice of evaluateJavascript runs. Background printing needs one
+     * synchronous render plus a native Bluetooth write, hence a separate path.
+     *
+     * volatile:写发生在主线程,读发生在 HTTP 线程 / written on the main thread and
+     * read on an HTTP thread.
+     */
+    private static volatile BackgroundPrinter backgroundPrinter;
+
+    /**
+     * App 界面当前是否处于前台 / whether the app UI is currently in the foreground.
+     *
+     * 前台继续走原来的 WebView 异步泵(它工作正常);只有界面不可见时才走后台
+     * 同步路径,避免两条路同时打印。
+     *
+     * In the foreground the existing asynchronous WebView pump still does the work;
+     * only when the UI is not visible does the synchronous background path run, so
+     * the two cannot both print the same job.
+     */
+    private static volatile boolean uiVisible;
+
+    /** 后台打印实现,由 MainActivity 提供 / implemented by MainActivity. */
+    public interface BackgroundPrinter {
+        /**
+         * @param filename  任务文件名,用于日志和回执 / job filename, for logging and ack
+         * @param shotJson  上传的原始 shot JSON / the raw uploaded shot JSON
+         * @param configJson 打印配置 JSON / the print config JSON
+         * @param machineId 机器名(票面上要印)/ machine name for the receipt
+         * @param done      原生写蓝牙结束后的回调 / called when the native write finishes
+         */
+        void print(String filename, String shotJson, String configJson,
+                   String machineId, PrintDone done);
+    }
+
+    /** 后台打印结果回调 / result callback for a background print. */
+    public interface PrintDone {
+        void onDone(boolean ok, String message);
+    }
+
     private ServerHolder() {
+    }
+
+    /** 注册/清除后台打印入口 / register or clear the background-print hook. */
+    public static void setBackgroundPrinter(BackgroundPrinter printer) {
+        backgroundPrinter = printer;
+    }
+
+    /**
+     * 尝试在后台打印一条任务 / try to print one job in the background.
+     *
+     * @return 是否找到了可用的后台入口(不代表打印成功)/
+     *         whether a background hook was available (not a success verdict)
+     */
+    public static boolean printInBackground(String filename, String shotJson, String configJson,
+                                            String machineId, PrintDone done) {
+        BackgroundPrinter printer = backgroundPrinter;
+        if (printer == null) return false;
+        try {
+            printer.print(filename, shotJson, configJson, machineId, done);
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "后台打印入口失败 / background-print hook failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** 界面可见性,由 MainActivity 的 onResume/onPause 维护 / maintained by MainActivity. */
+    public static void setUiVisible(boolean visible) {
+        uiVisible = visible;
+    }
+
+    public static boolean isUiVisible() {
+        return uiVisible;
     }
 
     /**

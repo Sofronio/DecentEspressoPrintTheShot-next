@@ -39,7 +39,7 @@
  * re-run the exporter rather than keeping two hand-maintained copies.
  */
 
-window.PTS_VERSION = "1.0.0-beta.4";
+window.PTS_VERSION = "1.0.0";
 
 window.PTS_STRINGS = {
   "en": {
@@ -136,6 +136,7 @@ window.PTS_STRINGS = {
     "latest_n": "Latest 9",
     "machine_id": "",
     "max_users": "Max Users",
+    "min_unit": "min",
     "next_day": "Next day",
     "no_data": "No data available",
     "per_page": "per page",
@@ -166,6 +167,7 @@ window.PTS_STRINGS = {
     "print_width": "Width",
     "queue_empty": "Queue is empty",
     "queue_status": "Queue Status: {count} jobs",
+    "queue_timeout": "Queue timeout",
     "recent_data": "Recently Received Data",
     "refresh": "Refresh",
     "server_title": "PrintTheShot Next Server v{VERSION}",
@@ -309,6 +311,7 @@ window.PTS_STRINGS = {
     "latest_n": "最新 9 条",
     "machine_id": "",
     "max_users": "最大用户",
+    "min_unit": "分钟",
     "next_day": "后一天",
     "no_data": "暂无数据",
     "per_page": "每页",
@@ -339,6 +342,7 @@ window.PTS_STRINGS = {
     "print_width": "宽度",
     "queue_empty": "队列为空",
     "queue_status": "打印队列: {count} 个任务",
+    "queue_timeout": "队列超时",
     "recent_data": "最近接收的数据",
     "refresh": "刷新",
     "server_title": "PrintTheShot Next 服务器 v{VERSION}",

@@ -91,7 +91,7 @@ from io import BytesIO
 #
 # The old numbers still have to compare correctly: a machine running 2.1-beta.3 must
 # know it should update. That mapping lives in _version_key.
-VERSION = "1.0.0-beta.4"
+VERSION = "1.0.0"
 
 # Android 的 versionCode,**独立于 VERSION 单调递增**。
 #
@@ -101,7 +101,7 @@ VERSION = "1.0.0-beta.4"
 # 会清掉他所有的 shot 数据。
 #
 # 所以它拆出来单独维护:发版时 VERSION 和 VERSION_CODE **一起改**,
-# 后者只增不减。当前值 = 上一版 20103 + 1,保证能覆盖现有安装。
+# 后者只增不减。当前值 = 上一版 20105 + 1,保证能覆盖现有安装。
 #
 # Android's versionCode, kept **independent of VERSION** and monotonically
 # increasing.
@@ -113,9 +113,9 @@ VERSION = "1.0.0-beta.4"
 # what wipes all their shot data.
 #
 # So it is maintained separately: bump VERSION and VERSION_CODE **together** on every
-# release, and the latter only ever goes up. Current value = previous 20103 + 1, so it
+# release, and the latter only ever goes up. Current value = previous 20105 + 1, so it
 # covers existing installs.
-VERSION_CODE = 20104
+VERSION_CODE = 20106
 
 def runtime_data_dir():
     """
@@ -574,6 +574,8 @@ LANGUAGES = {
         "print_mode": "Mode",
         "print_width": "Width",
         "print_saved": "Print settings saved",
+        "queue_timeout": "Queue timeout",
+        "min_unit": "min",
         "btn_shutdown": "Stop service",
         "shutdown_confirm": "Stop the PrintTheShot service? The web interface will become unavailable and you will need to start the app again.",
         "shutdown_ok": "Service stopped",
@@ -760,6 +762,8 @@ LANGUAGES = {
         "print_mode": "模式",
         "print_width": "宽度",
         "print_saved": "打印设置已保存",
+        "queue_timeout": "队列超时",
+        "min_unit": "分钟",
         "btn_shutdown": "停止服务",
         "shutdown_confirm": "确定要停止 PrintTheShot 服务吗?管理界面将不可用,需要重新启动应用才能恢复。",
         "shutdown_ok": "服务已停止",
@@ -1098,17 +1102,39 @@ PRINT_DEFAULTS = {
     "cut": True,
     "threshold": 200,        # 二值化阈值 / binarisation threshold
     "rotate": True,
+    # 待打印任务超时(分钟)/ pending-print timeout, in minutes
+    # 超过这么久的任务会被自动移出队列,而不是等下次打开界面时补打。
+    # Jobs older than this are dropped from the queue instead of being printed
+    # later when the UI comes back.
+    "queue_timeout_min": 3,
 }
 
 def print_config():
-    """当前打印配置(默认值 + 已保存的设置)/ current print config (defaults + saved)."""
+    """
+    当前打印配置(默认值 + 已保存的设置)/ current print config (defaults + saved).
+
+    两个开关也在这里面:前端打印那条路(printer.js)拿到的是这份配置,而「豆子
+    信息画不画」是画图时的参数 —— 界面上的开关和不干胶上那张图必须一致。
+
+    The two switches ride along here: the printing path in printer.js reads this
+    config, and "does the chart draw bean info" is a rendering parameter — the
+    switch in the UI and the chart on paper have to agree.
+    """
     cfg = dict(PRINT_DEFAULTS)
     cfg.update(settings.get("print", {}) or {})
+    # 回给前端的永远是校验过的值,界面的下拉才不会因为 settings.json 里一个坏值
+    # 而选不中任何一项。
+    #
+    # Always hand the UI a validated value, so a bad entry in settings.json cannot
+    # leave the drop-down with nothing selected.
+    cfg["queue_timeout_min"] = _queue_timeout_seconds() // 60
     adapter = get_printer()
     cfg["platform"] = adapter.platform_id
     cfg["platform_name"] = adapter.display_name
     cfg["available"] = adapter.is_available()
     cfg["raw_supported"] = adapter.supports_raw()
+    cfg["print_enabled"] = PRINT_ENABLED
+    cfg["bean_info_enabled"] = BEAN_INFO_ENABLED
     return cfg
 
 def refresh_printer(config=None):
@@ -1226,6 +1252,14 @@ def queue_print_job(filename, machine_id=""):
     log, or every duplicate upload claims to have been queued when it was not.
     """
     with pending_lock:
+        # 顺手清一遍过期任务:不这么做的话,一条没人取走的旧任务会一直挡着同内容
+        # 的新上传(下面的按内容去重看的是整个队列)。
+        #
+        # Sweep expired jobs first: otherwise one abandoned job keeps blocking a
+        # fresh upload of the same content (the de-duplication below looks at the
+        # whole queue).
+        _prune_expired_prints(time.time())
+
         if any(j["filename"] == filename for j in pending_prints):
             return False
 
@@ -1252,6 +1286,9 @@ def queue_print_job(filename, machine_id=""):
             "hash": h or "",
             "machine_id": machine_id or "",
             "queued": datetime.now().strftime("%H:%M:%S"),
+            # 入队时刻(epoch 秒),超时清理按它算年龄。
+            # When the job joined the queue (epoch seconds); expiry is measured from it.
+            "queued_at": time.time(),
             "attempts": 0,
         })
         # 队列不设上限的话,一台关着的机器能让它无限涨下去
@@ -1260,10 +1297,72 @@ def queue_print_job(filename, machine_id=""):
             del pending_prints[:-MAX_PENDING]
         return True
 
-def take_pending_prints():
-    """取出待打印队列(不移除,等客户端 ack)/ read the queue without removing."""
+def _queue_timeout_seconds():
+    """
+    当前队列超时(秒)/ the configured pending-print timeout, in seconds.
+
+    配置值坏了或越界就退回默认值 —— 队列不该因为 settings.json 里一个手滑的
+    字符串而永远不清。上限一天,再长就等于没有超时了。
+    A malformed or out-of-range value falls back to the default: the queue must
+    not stop expiring because of one typo in settings.json. The upper bound is a
+    day; anything longer is effectively "never".
+    """
+    raw = (settings.get("print") or {}).get(
+        "queue_timeout_min", PRINT_DEFAULTS["queue_timeout_min"])
+    try:
+        minutes = int(raw)
+    except (TypeError, ValueError):
+        minutes = PRINT_DEFAULTS["queue_timeout_min"]
+    if minutes < 1:
+        minutes = PRINT_DEFAULTS["queue_timeout_min"]
+    return min(minutes, 1440) * 60
+
+def _prune_expired_prints(now):
+    """
+    把超时的任务移出队列 / drop jobs that have outlived the timeout.
+
+    必须在 pending_lock 里调用 / must be called with pending_lock held.
+
+    为什么真的删掉而不是只在返回时过滤:队列的含义是「还没打的东西」。过期任务
+    留着既占 MAX_PENDING 名额,也会挡掉同内容的新上传(按内容去重看的是整个
+    队列)。删掉只影响补打,shot 历史仍在。
+
+    Why actually remove them instead of filtering on the way out: the queue means
+    "not printed yet". Expired jobs would keep occupying MAX_PENDING slots and
+    block a fresh upload of the same content (content de-duplication looks at the
+    whole queue). Removing them only stops the catch-up print; the shot history
+    is untouched.
+    """
+    timeout = _queue_timeout_seconds()
+    kept, dropped = [], 0
+    for job in pending_prints:
+        queued_at = job.get("queued_at")
+        # 没有时间戳的任务(旧版本/手工塞进来的)无法定龄,保守地留着。
+        # Jobs without a timestamp (older code, injected by hand) cannot be aged,
+        # so they are kept — never drop what we cannot measure.
+        if queued_at is not None and now - queued_at >= timeout:
+            dropped += 1
+            continue
+        kept.append(job)
+    if dropped:
+        pending_prints[:] = kept
+        print("⏰ 队列超时,移除 %d 个任务 / dropped %d expired job(s)" % (dropped, dropped))
+
+def take_pending_prints(now=None):
+    """
+    取出待打印队列(不移除,等客户端 ack)/ read the queue without removing.
+
+    now 只给测试驱动时间用 / now exists so tests can drive the clock.
+    """
     with pending_lock:
-        now = time.time()
+        now = now or time.time()
+        # 先清过期任务:前端重新打开时会立刻来取队列,这一步就是「别补打历史」
+        # 的闸门。清理和下面的过滤要在同一把锁里,否则并发轮询会看到不一致的队列。
+        #
+        # Expired jobs go first: the front end polls the moment it comes back, and
+        # this is the gate that keeps a backlog from printing. It shares the lock
+        # with the filter below so concurrent polls cannot see different queues.
+        _prune_expired_prints(now)
         # 第一份打成功之后,同内容的其余副本还排在队列里,但它们已经不该再打了 ——
         # 前端每打一个任务就重新拉一次队列,正是靠这里把它们滤掉。
         #
@@ -2246,11 +2345,32 @@ class PrintTheShotHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         allowed = {"printer", "mode", "media", "print_width", "paper_width_mm",
-                   "feed_lines", "cut", "threshold", "rotate"}
+                   "feed_lines", "cut", "threshold", "rotate", "queue_timeout_min"}
         changed = {}
         for key in allowed:
             if key in data:
                 changed[key] = data[key]
+
+        # 队列超时单独校验:它决定多少历史数据会被丢掉,不能接受一个手滑的 0
+        # 或字符串 —— 0 会让所有任务立刻过期,而静默写坏只会表现为「怎么不打了」。
+        #
+        # The queue timeout is validated separately: it decides how much history is
+        # discarded, so a mistyped 0 or a string must not get through. Zero would
+        # expire everything immediately, and storing it silently would only show up
+        # as "nothing prints any more".
+        if "queue_timeout_min" in changed:
+            try:
+                minutes = int(changed["queue_timeout_min"])
+            except (TypeError, ValueError):
+                minutes = 0
+            if not 1 <= minutes <= 1440:
+                self._send_json({
+                    "success": False,
+                    "message": "queue_timeout_min 必须是 1-1440 的整数 / must be an integer in 1-1440",
+                }, 400)
+                return
+            changed["queue_timeout_min"] = minutes
+
         settings["print"] = {**settings.get("print", {}), **changed}
         save_settings()
         # 配置变了要重新装载适配器,否则改纸张/模式不会生效
@@ -2471,8 +2591,32 @@ class PrintTheShotHandler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 print("⚠️ 翻译失败,返回原文 / translation failed, returning original: %s" % e)
 
+        # 机器名:上传时记在**索引**里,shot 文件里没有这个字段。而图左下角要印它,
+        # 于是这里有两条来源 —— 调用方自己带(machine_id=...),或者从索引里查。
+        #
+        # 查索引这条是必须的:缩略图、大图、打印三条路都读这个接口,而其中只有
+        # 自动打印那条手里有机器名(队列任务带过来的,见 queue_print_job)。少了
+        # 这次查询,大图打印出来就是「机器: UNKNOWN」,而列表里明明写着机器名。
+        #
+        # The machine name is recorded in the **index** at upload time; the shot file
+        # has no such field, and the chart prints it bottom-left. So there are two
+        # sources here: the caller passes it (machine_id=...), or it is looked up in
+        # the index.
+        #
+        # The lookup is the load-bearing one: thumbnails, the large view and printing
+        # all read this endpoint, and only the auto-print path has the name in hand
+        # (it rides along on the queue job — see queue_print_job). Without this lookup,
+        # printing from the large view says "机器: UNKNOWN" while the list right next to
+        # it shows the machine name.
         machine_id = q.get("machine_id", [""])[0]
+        if not machine_id:
+            with shots_lock:
+                for s in received_shots:
+                    if s.get("filename") == filename:
+                        machine_id = s.get("machine_id") or ""
+                        break
         if machine_id:
+            shot_data["machine_id"] = machine_id
             shot_data.setdefault("_display", {})["machine_id"] = machine_id
         self._send_json({
             "success": True, "filename": filename, "lang": lang, "shot": shot_data,

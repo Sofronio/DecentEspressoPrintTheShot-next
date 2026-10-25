@@ -458,6 +458,56 @@ public class PrintTheShotPrinterPlugin extends Plugin {
     }
 
     /**
+     * 把前端给的一段内容写进「下载」目录 / write a blob handed over by the front end.
+     *
+     * 大图工具栏上的「存图片」「存曲线」走这里。它们在浏览器里是普通的
+     * `<a download>`,而 WebView **不处理**它 —— 点了不保存、也没提示,用户看到
+     * 的就是「按钮没反应」。让原生把字节写出去是唯一能落盘的路(和 savePlugin、
+     * exportBackup 的理由一样,见它们的注释)。
+     *
+     * The "save image" / "save curve" buttons on the lightbox toolbar come through
+     * here. In a browser they are a plain `<a download>`, which a WebView does **not**
+     * act on: the tap saves nothing and says nothing, so the button reads as dead.
+     * Writing the bytes out natively is the only path that actually lands a file (same
+     * reasoning as savePlugin and exportBackup — see their comments).
+     *
+     * @param call `{name: string, mime: string, base64: string}`
+     * @return `{success: boolean, path: string, message: string}`
+     */
+    @PluginMethod
+    public void saveFile(PluginCall call) {
+        String name = call.getString("name", "");
+        String mime = call.getString("mime", "application/octet-stream");
+        String base64 = call.getString("base64", "");
+        if (name.isEmpty() || base64.isEmpty()) {
+            call.reject("缺少文件名或内容 / missing name or content");
+            return;
+        }
+        // 文件名只取最后一段:桥对面的东西不该决定写到哪儿
+        // Keep only the last path segment: what comes across the bridge does not get
+        // to decide where this lands.
+        name = name.substring(name.lastIndexOf('/') + 1).replace("\\", "_");
+        if (name.isEmpty() || name.startsWith(".")) {
+            call.reject("文件名不合法 / invalid filename: " + name);
+            return;
+        }
+
+        try {
+            byte[] data = android.util.Base64.decode(base64, android.util.Base64.DEFAULT);
+            String path = writeToDownloads(name, data, mime);
+
+            JSObject ret = new JSObject();
+            ret.put("success", true);
+            ret.put("path", path);
+            ret.put("message", "已保存到「下载」/ saved to Downloads: " + name);
+            call.resolve(ret);
+        } catch (Exception e) {
+            Log.w(TAG, "保存失败 / save failed: " + e.getMessage());
+            call.reject("保存失败 / save failed: " + e.getMessage());
+        }
+    }
+
+    /**
      * 写进公共下载目录 / write into the public Downloads folder.
      *
      * Android 10 (API 29) 起是分区存储,必须通过 MediaStore 落盘 —— 直接写

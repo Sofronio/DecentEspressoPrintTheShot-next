@@ -20,16 +20,116 @@ window.addEventListener('error', function (e) { window.__errs.push(String(e.mess
 window.Capacitor = { isNativePlatform: function(){ return true; }, Plugins: {} };
 </script>
 <script src="/web/printer.js"></script>
-<script src="/web/app.js"></script>
 <script>
+(async function () {
 var results = [];
-try {
 function check(n, c, d) { results.push({name:n, ok:!!c, detail: d===undefined?'':String(d)}); }
+
+/**
+ * 这一页要跑的 app.js,必须是**打包进 APK 的那一份** —— 原样复制、占位符还在
+ * 的那份。原来这里直接 `<script src="/web/app.js">`,以为拿到的是原样文件;其实
+ * 服务端对 /web/ 下的文件做模板替换(那是浏览器路径该有的样子),所以这一页拿到
+ * 的一直是替换过的版本 —— 它从来没真的模拟过 APK。
+ *
+ * 之所以一直没露馅:「占位符还在吗」那个判断当时是坏的(见 app.js 里的注释),
+ * 服务端注入的表从来没被用上,两条路径最后都落到「按系统语言挑自带表」,看起来
+ * 一模一样。判断修好之后两条路径分开了,这页就必须拿到真的原样文件才算数。
+ *
+ * 所以:取回 /web/app.js,把服务端注入进去的那段 JSON 还原成占位符再执行。不在
+ * tests/ 下放一份拷贝,是因为拷贝会和真正的 app.js 走散;这里每次用的都是同一份
+ * 源文件,还原规则也只有一条。
+ *
+ * The app.js this page runs has to be the copy that ships inside the APK: verbatim,
+ * placeholder and all. It used to be a plain `<script src="/web/app.js">`, on the
+ * assumption that this returned the file unchanged — but the server substitutes
+ * templates for everything under /web/ (which is what the browser path wants), so
+ * this page was getting the substituted version. In other words it never actually
+ * simulated the APK.
+ *
+ * What kept that hidden: the "is the placeholder still there" test was broken (see
+ * the comment in app.js), so the injected table was never used and both paths ended
+ * up in the same place — pick the built-in table by system language. Fix that test
+ * and the two paths diverge, so this page has to get the genuine article.
+ *
+ * Hence: fetch /web/app.js and turn the injected JSON back into the placeholder
+ * before running it. No copy under tests/, because a copy drifts from the real
+ * app.js; this way every run uses the same source file, with one rule for undoing it.
+ */
+var PH = '{' + '{LANG}}';
+var src = await (await fetch('/web/app.js')).text();
+// 非贪婪:注入的那段 JSON 里没有单引号(服务端会把 ' 转成 &#39;)也没有换行,
+// 所以第一个 `';\n` 就是赋值的结尾。贪婪会一路吃到文件里最后一行 `';\n`。
+// Non-greedy: the injected JSON has no single quote (the server turns ' into &#39;)
+// and no newline, so the first `';\n` closes the assignment; a greedy match would
+// run on to the last `';\n` in the file.
+var blob = src.match(/const raw = '(.*?)';\n/s);
+var restored = blob ? src.split(blob[1]).join(PH) : src;
+
+// 上一页(web_test / ui_test)可能在这个浏览器里存过语言选择 —— 先清掉,这一页
+// 的「还没选过」才是确定的。
+// A previous page (web_test / ui_test) may have stored a language choice in this
+// browser profile; clear it so "nothing chosen yet" is definite here.
+try { localStorage.removeItem('pts_lang'); } catch (e) {}
+
+try {
+  // 作为普通脚本插进去执行 —— 和 APK 里 `<script src="app.js">` 是同一种执行方式,
+  // 顶层 `const L` 才是一个全局词法绑定,能被下面的断言读到。
+  //
+  // 不能用 eval:eval 里的顶层 let/const 作用域限于 eval 自己,`const L` 在 eval
+  // 返回后就没了(L is not defined)。脚本元素没有这个问题。
+  //
+  // Insert it as an ordinary script element: that is how the APK runs it (a plain
+  // `<script src="app.js">`), and it makes the top-level `const L` a global lexical
+  // binding the assertions below can read.
+  //
+  // Not eval: a top-level let/const inside eval is scoped to that eval and is gone
+  // once it returns ("L is not defined"). A script element has no such problem.
+  var el = document.createElement('script');
+  el.textContent = restored;
+  document.body.appendChild(el);
+} catch (e) {
+  // app.js 顶层会去拿 #dropzone,这一页没有 —— 和以前一样在这里中断,不影响
+  // 下面要断言的东西。
+  // app.js reaches for #dropzone at top level and this page has none; it stops
+  // there, exactly as before, and nothing asserted below needs it.
+  window.__errs.push('app.js stopped at: ' + e.message);
+}
+
+try {
+check('装进来的是原样文件,占位符还在 / the restored file still carries the placeholder',
+  restored.indexOf(PH) !== -1, restored.length + ' bytes');
 check('app.js 没有在第一行就挂 / app.js did not die on line 1', typeof L === 'object', typeof L);
 check('L 有内容 / L is populated', L && Object.keys(L).length > 50, L ? Object.keys(L).length + ' keys' : 'none');
-check('L.__code 推断为 zh(系统语言)/ guessed zh from the system language', L.__code === 'zh', L.__code);
+// 服务端注入的表一定带 __version / __languages,自带表一定不带 —— 只有这条能区分
+// 「用的是自带表」和「注入的表漏进来了」,光看文案是看不出来的。
+// The injected table always carries __version/__languages and the built-in one never
+// does, so this is what tells the two apart — the strings alone cannot.
+check('用的是自带表,不是服务端注入的那份 / built-in table, not the injected one',
+  L && L.__version === undefined && L.__languages === undefined,
+  L ? ('__version=' + L.__version + ' __languages=' + typeof L.__languages) : 'none');
+check('L.__code 推断为 zh(没选过时跟系统语言)/ guessed zh from the system language',
+  L.__code === 'zh', L.__code);
 check('文案是中文而不是 key / strings are words, not keys', L.status_running && L.status_running !== 'status_running', L.status_running);
 check('platform detection works', window.PrintTheShotPrinter && window.PrintTheShotPrinter.isNative() === true);
+
+// ★ 语言切换的核心:选了 English 之后,重载出来必须是英文 —— 靠的是本机记住的
+//   那个选择,不是系统语言。APK 里没有服务端会去注入文案表,这份记忆是唯一的
+//   依据;它一丢,按钮就变回「点了没反应」。
+// ★ The heart of the language switch: after picking English, a reload has to come
+//   back in English — off the stored choice, not the system language. Inside the APK
+//   no server injects a table, so this record is the only thing to go on; lose it and
+//   the button is back to doing nothing.
+try { localStorage.setItem('pts_lang', 'en'); } catch (e) {}
+var picked = resolveStrings();
+check('选了 English 之后出英文 / picking English yields English',
+  picked.__code === 'en' && picked.status_running === 'Running',
+  picked.__code + ' / ' + picked.status_running);
+try { localStorage.removeItem('pts_lang'); } catch (e) {}
+var cleared = resolveStrings();
+check('清掉选择后回到系统语言 / clearing it falls back to the system language',
+  cleared.__code === 'zh' && cleared.status_running === '运行中',
+  cleared.__code + ' / ' + cleared.status_running);
+
 // Android 上 apiUrl 必须指向平板自己的服务(App 内跑着 MiniHttpServer)。
 // 之前这里测的是「填一个桌面服务端地址」的客户端模式,那个模式已经去掉 ——
 // 平板自己就是服务端,没有需要用户配置的东西。
@@ -68,11 +168,14 @@ var _ph = '{' + '{VERSION}}';
 var _t = document.title;
 check('标题占位符被替换 / title placeholder filled in',
   _t.indexOf(_ph) === -1 && /v\d+\.\d+/.test(_t), _t);
+} catch (err) {
+  results.push({name:'UNCAUGHT: ' + err.message, ok:false, detail: (err.stack||'').split('\n')[1]||''});
+}
 
 var pre = document.createElement('pre'); pre.id='JSON';
 var failed = results.filter(function(r){return !r.ok;}).length;
 pre.textContent = JSON.stringify({passed: results.length - failed, failed: failed, results: results});
 document.body.appendChild(pre);
 document.getElementById('out').textContent = 'done';
-} catch (err) { results.push({name:'UNCAUGHT: ' + err.message, ok:false, detail: (err.stack||'').split('\n')[1]||''}); }
+})();
 </script></body></html>

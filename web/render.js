@@ -195,6 +195,27 @@
   }
 
   /**
+   * 字体是否已经就绪(同步)/ whether the bundled font is ready (synchronous).
+   *
+   * 后台打印必须在一次同步脚本里跑完,不能 await ensureFontReady();这里只做
+   * 一次同步查询,没就绪就让调用方回退到前台异步路径。
+   *
+   * Background printing must finish inside one synchronous script and cannot await
+   * ensureFontReady(); this is a synchronous query only. When it is not ready the
+   * caller falls back to the foreground async path.
+   */
+  function isFontReady() {
+    if (fontReady) return true;
+    if (typeof document === 'undefined' || !document.fonts) return true;
+    try {
+      return document.fonts.check('16px "NotoSansCJKsc"')
+          && document.fonts.check('bold 16px "NotoSansCJKsc"');
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
    * 造一个 canvas 用的 font 字符串。px 为逻辑像素字号,与 Pillow 的像素字号一一对应。
    * Build a canvas font string. `px` is the logical pixel size, matching the
    * pixel sizes used by the Pillow version one-to-one.
@@ -631,6 +652,8 @@
    *        lang      {string} 语言代码,默认 'zh' / language code, default 'zh'
    *        strings   {Object} 覆盖用的文案表 / label overrides
    *        machineId {string} 机器 ID,默认 'UNKNOWN' / machine ID
+   *        beanInfo  {boolean} 是否画豆子信息栏,默认 true(界面上的开关)
+   *                            draw the bean-info column, default true
    *        scale     {number} 像素密度倍数,默认 1(见下)/ device pixel ratio
    *        background{string} 背景色,默认 '#fff' / background colour
    * @returns {{ok:boolean, error?:string}}
@@ -647,7 +670,20 @@
   function renderShotToCanvas(shotJson, canvas, options) {
     options = options || {};
     var lang = options.lang || 'zh';
-    var machineId = options.machineId || 'UNKNOWN';
+    // 机器名的来源,按可靠程度排:调用方明确给的 → shot 数据里带的 → 未知。
+    //
+    // 中间那条是给大图和缩略图用的:机器名只存在服务端索引里,上传的 JSON 里没有,
+    // 所以 /api/shot 会把它补进返回的数据(见服务端的注释)。少了它,大图上印的是
+    // 「机器: UNKNOWN」,而列表里同一条明明写着机器名。
+    //
+    // Where the machine name comes from, most reliable first: what the caller passed,
+    // what the shot data carries, then unknown.
+    //
+    // The middle one is for the large view and the thumbnails: the name lives only in
+    // the server's index, not in the uploaded JSON, so /api/shot fills it into the data
+    // it returns (see the server-side comment). Without it the large view prints
+    // "机器: UNKNOWN" while the list shows the machine name for the same shot.
+    var machineId = options.machineId || (shotJson && shotJson.machine_id) || 'UNKNOWN';
     var scale = options.scale || 1;
     var t = resolveStrings(lang, options.strings);
 
@@ -843,8 +879,18 @@
     drawTextColumn(ctx, col1, COL1_X, fontCol1Title, fontCol1);
 
     // ---- 第二列文本(豆子信息或方案信息)/ Column 2 text (bean info or profile info) ----
+    //
+    // 豆子信息开关(界面上那颗「禁用豆子信息」)关掉时,这一栏当作**没有豆子数据**
+    // 处理:显示方案信息,而不是空着。这是老版本(出图还在服务端时)的行为 ——
+    // 「豆子信息已禁用」和「这条数据里没有豆子信息」在图上长得一模一样。
+    //
+    // With the bean-info switch off (the "Disable Bean Info" button), this column is
+    // treated as **having no bean data**: it shows the profile info instead of going
+    // blank. That is what the older build did, back when the server drew the chart —
+    // "bean info turned off" and "this shot carries no bean info" look identical.
     var beanData = (meta.bean) || {};
-    var hasBeanInfo = !!(beanData && (beanData.brand || beanData.type || beanData.notes));
+    var hasBeanInfo = (options.beanInfo !== false) &&
+      !!(beanData && (beanData.brand || beanData.type || beanData.notes));
 
     // 按文本长度调字号,再按渲染宽度换行 / fit the font, then wrap by width
     var beanBlock = function (text) {
@@ -898,10 +944,19 @@
 
     // ---- 轴标题(竖向,17px = 与图例同大;最后绘制,盖住轴与刻度)----
     // ---- Axis titles (vertical, 17px = legend size; drawn last so they sit on top) ----
+    //
+    // 流速那个原来在 866,正好压在右侧流速轴的刻度数字上(数字从 858 起、两位数
+    // 约 17px 宽),「流速 (克/秒)」的笔画和「10」叠在一起。右移到刻度数字之外,
+    // 又不挤到第一列文字(905 起)。
+    //
+    // The flow title used to sit at 866, right on top of the flow axis' tick numbers
+    // (they start at 858 and a two-digit value is about 17px wide), so "流速 (克/秒)"
+    // and "10" overlapped. Moved clear of the numbers, without crowding column 1
+    // (which starts at 905).
     var axisTitles = [
       [16, t.chart_temperature],
       [74, t.chart_pressure],
-      [866, t.chart_flow]
+      [888, t.chart_flow]
     ];
     var midY = (PLOT_T + PLOT_B) / 2;
     for (var at = 0; at < axisTitles.length; at++) {
@@ -1070,6 +1125,7 @@
     FONT_STACK: FONT_STACK,
     STRINGS: STRINGS,
     ensureFontReady: ensureFontReady,
+    isFontReady: isFontReady,
     renderShotToCanvas: renderShotToCanvas,
     canvasToBitmap: canvasToBitmap,
     bitmapToBase64: bitmapToBase64,

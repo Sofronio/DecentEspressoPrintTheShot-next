@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -63,6 +64,7 @@ public class ShotStore {
      */
     static final long DEDUPE_WINDOW_MS = 30_000;
 
+    private final Context ctx;
     private final File dir;
     private final File indexFile;
     private final Object lock = new Object();
@@ -72,6 +74,18 @@ public class ShotStore {
 
     /** 待打印队列 / the pending-print queue. */
     private final List<JSONObject> pending = new ArrayList<>();
+
+    /**
+     * 后台打印正在处理的任务 / jobs currently owned by the background-print path.
+     *
+     * 被认领的任务仍然留在 pending 里(去重、超时都还要看它),但**不返回给前端** ——
+     * 否则 App 在打印途中被切回前台,前台的异步泵会再打一遍。
+     *
+     * Claimed jobs stay in `pending` (de-duplication and expiry still see them) but are
+     * **not returned to the front end**, or a background print that is still in flight
+     * would be printed a second time if the app comes back to the foreground.
+     */
+    private final Set<String> backgroundClaims = new HashSet<>();
 
     /**
      * 内容哈希 → 最近一次**打印成功**的时刻 / content hash → when it was last printed.
@@ -92,6 +106,7 @@ public class ShotStore {
     private final Map<String, Long> printedAt = new LinkedHashMap<>();
 
     public ShotStore(Context ctx) {
+        this.ctx = ctx;
         dir = new File(ctx.getFilesDir(), "shots_data");
         if (!dir.exists()) dir.mkdirs();
         indexFile = new File(dir, "index.json");
@@ -212,8 +227,17 @@ public class ShotStore {
      * The filename carries a microsecond ID so two uploads in the same second cannot
      * collide — the Python side hit that, and the symptom was a shot silently
      * disappearing, which is hard to trace.
+     *
+     * queueForPrint = false 时只存不排队:那是界面上「禁用打印」开关的位置。关掉
+     * 之后数据照收照存(列表里看得到),只是不再自动出纸;手动按打印照常能打。
+     * Python 端一直是这个语义(见 handle_upload 里的 `if PRINT_ENABLED`)。
+     *
+     * queueForPrint = false stores without queueing, which is what the "printing
+     * disabled" switch does. Data still arrives and is still listed; it just stops
+     * printing by itself. Pressing print by hand still works. The Python side has
+     * always behaved this way (see `if PRINT_ENABLED` in handle_upload).
      */
-    public JSONObject save(byte[] body, String machineId) throws Exception {
+    public JSONObject save(byte[] body, String machineId, boolean queueForPrint) throws Exception {
         // 先解析,确认真的是 JSON —— 存进去一个坏文件只会让后面每次列表都出错。
         // Parse first: storing a malformed file would break every later listing.
         JSONObject shot = new JSONObject(new String(body, StandardCharsets.UTF_8));
@@ -234,7 +258,7 @@ public class ShotStore {
             persistIndex();
             // 机器名一起带上:它只在这个索引里,打印那一端拿不到别的来源
             // Carry the machine name; the index is the only place it exists
-            if (!pendingContains(filename)) queuePrintLocked(filename, machineId);
+            if (queueForPrint && !pendingContains(filename)) queuePrintLocked(filename, machineId);
             return meta;
         }
     }
@@ -311,6 +335,7 @@ public class ShotStore {
     /** 列表(可按日期过滤)/ the listing, optionally filtered by date. */
     public JSONObject list(String dateYyyyMmDd) {
         synchronized (lock) {
+            pruneExpiredLocked(System.currentTimeMillis());
             JSONArray out = new JSONArray();
             Set<String> dates = new TreeSet<>(Collections.reverseOrder());
             for (JSONObject o : index) {
@@ -345,6 +370,7 @@ public class ShotStore {
     /** 统计 / statistics. */
     public JSONObject stats() {
         synchronized (lock) {
+            pruneExpiredLocked(System.currentTimeMillis());
             Map<String, Integer> byDate = new LinkedHashMap<>();
             Map<String, Integer> byProfile = new LinkedHashMap<>();
             Map<String, Integer> byBean = new LinkedHashMap<>();
@@ -486,6 +512,58 @@ public class ShotStore {
     }
 
     /**
+     * 待打印任务超时(毫秒)/ the pending-print timeout, in milliseconds.
+     *
+     * 配置来自 SharedPreferences(界面打印设置卡片上的「队列超时」)。坏值退回
+     * 默认 —— 队列不该因为一个手滑的值而永远不清。
+     *
+     * The value comes from SharedPreferences (the "queue timeout" control on the
+     * print settings card). A bad value falls back to the default: the queue must
+     * not stop expiring because of one typo.
+     */
+    private long queueTimeoutMs() {
+        int minutes = ctx.getSharedPreferences(AppServer.PREFS, Context.MODE_PRIVATE)
+                .getInt(AppServer.KEY_QUEUE_TIMEOUT_MIN, AppServer.QUEUE_TIMEOUT_MIN_DEFAULT);
+        if (minutes < 1) minutes = AppServer.QUEUE_TIMEOUT_MIN_DEFAULT;
+        if (minutes > 1440) minutes = 1440;
+        return minutes * 60_000L;
+    }
+
+    /**
+     * 清掉超时的待打印任务 / drop pending jobs that have outlived the timeout.
+     *
+     * 为什么要真的删掉而不是只在返回时过滤:队列的含义是「还没打的东西」。过期
+     * 任务留着既占 MAX_PENDING 名额,也会挡掉同内容的新上传(按内容去重看的是
+     * 整个队列)。删掉只影响补打,shot 历史仍在。
+     *
+     * Why actually remove them instead of filtering on the way out: the queue means
+     * "not printed yet". Expired jobs would keep occupying MAX_PENDING slots and
+     * block a fresh upload of the same content (content de-duplication looks at the
+     * whole queue). Only the catch-up print is lost; the shot history stays.
+     */
+    private void pruneExpiredLocked(long now) {
+        long timeout = queueTimeoutMs();
+        int dropped = 0;
+        Iterator<JSONObject> it = pending.iterator();
+        while (it.hasNext()) {
+            JSONObject o = it.next();
+            // 正在后台打印的任务不能被超时清掉 —— 它已经有人接手了。
+            // A job being printed in the background must not expire; it is already claimed.
+            if (backgroundClaims.contains(o.optString("filename"))) continue;
+            long queuedAt = o.optLong("queued_at", 0L);
+            // 没有时间戳的任务无法定龄,保守地留着。
+            // No timestamp means no age, so keep it rather than guess.
+            if (queuedAt > 0L && now - queuedAt >= timeout) {
+                it.remove();
+                dropped++;
+            }
+        }
+        if (dropped > 0) {
+            Log.i(TAG, "队列超时,移除 " + dropped + " 个任务 / dropped " + dropped + " expired job(s)");
+        }
+    }
+
+    /**
      * 入队 / queue one job.
      *
      * machineId 跟着任务走:它不在 shot 文件里(那份是上传的原始 JSON),只在索引
@@ -498,6 +576,14 @@ public class ShotStore {
      */
     private void queuePrintLocked(String filename, String machineId) {
         try {
+            // 顺手清一遍过期任务:不这么做的话,一条没人取走的旧任务会一直挡着
+            // 同内容的新上传(下面的按内容去重看的是整个队列)。
+            //
+            // Sweep expired jobs first: otherwise one abandoned job keeps blocking
+            // a fresh upload of the same content (the de-duplication below looks at
+            // the whole queue).
+            pruneExpiredLocked(System.currentTimeMillis());
+
             // 哈希在入队时算一次,存进任务里。之后判断「这份打过没有」就只是查表 ——
             // 否则每次轮询队列都要把 50 个文件重新读一遍再算一遍 SHA-256。
             // 文件写入后不再改变(重复上传是**新文件名**),所以算一次就够了。
@@ -522,9 +608,15 @@ public class ShotStore {
             job.put("hash", hash == null ? "" : hash);
             job.put("machine_id", machineId == null ? "" : machineId);
             job.put("queued", new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date()));
+            // 入队时刻(epoch 毫秒),超时清理按它算年龄。
+            // When the job joined the queue (epoch ms); expiry is measured from it.
+            job.put("queued_at", System.currentTimeMillis());
             job.put("attempts", 0);
             pending.add(job);
-            while (pending.size() > MAX_PENDING) pending.remove(0);
+            while (pending.size() > MAX_PENDING) {
+                JSONObject evicted = pending.remove(0);
+                backgroundClaims.remove(evicted.optString("filename"));
+            }
         } catch (Exception ignored) { }
     }
 
@@ -545,18 +637,71 @@ public class ShotStore {
      * The manual path only has a filename (the automatic one carries the id along from
      * save time), so it looks it up. An empty string when there is nothing to find; the
      * receipt then says UNKNOWN, which is the same as "there was never a machine name".
+     *
+     * public 也是给 /api/shot 用的:那条路要把机器名放进返回给前端的 JSON(缩略图
+     * 和大图也读它),见 AppServer 里的注释。
+     *
+     * Public for /api/shot as well: that path puts the machine name into the JSON the
+     * front end gets back (thumbnails and the large view read it too), see the comment
+     * in AppServer.
      */
-    private String machineIdOf(String filename) {
+    public String machineIdOf(String filename) {
         for (JSONObject m : index) {
             if (filename.equals(m.optString("filename"))) return m.optString("machine_id", "");
         }
         return "";
     }
 
+    /**
+     * 认领一条任务给后台打印 / claim a pending job for the background path.
+     *
+     * 认领之后这条任务对前端不可见(见 pendingJobs),直到成功 ack 或失败释放。
+     * 这样 App 在后台打印途中被切回前台时,前端不会把同一条再打一遍。
+     *
+     * After a claim the job is invisible to the front end (see pendingJobs) until it is
+     * acked or released, so bringing the app back mid-print cannot make the foreground
+     * pump print it again.
+     *
+     * @return 是否由本次调用认领成功 / whether this call took the claim
+     */
+    public boolean claimForBackgroundPrint(String filename) {
+        synchronized (lock) {
+            pruneExpiredLocked(System.currentTimeMillis());
+            for (JSONObject o : pending) {
+                if (filename.equals(o.optString("filename"))) {
+                    return backgroundClaims.add(filename);
+                }
+            }
+            return false;
+        }
+    }
+
+    /** 释放认领,任务回到前端可见队列 / release a claim so the front end can see it again. */
+    public void releaseBackgroundClaim(String filename) {
+        synchronized (lock) {
+            backgroundClaims.remove(filename);
+        }
+    }
+
+    /** 这条任务还在队列里吗 / is this job still pending? */
+    public boolean isPending(String filename) {
+        synchronized (lock) {
+            return pendingContains(filename);
+        }
+    }
+
     public JSONArray pendingJobs() {
         synchronized (lock) {
+            // 前端重新打开时会立刻来取队列 —— 这一步就是「别补打历史」的闸门。
+            // The front end polls the moment it comes back; this is the gate that
+            // keeps a stale backlog from printing.
+            pruneExpiredLocked(System.currentTimeMillis());
             JSONArray arr = new JSONArray();
             for (JSONObject o : pending) {
+                // 后台正在打的任务不交给前端 —— 否则切回前台会重复出票。
+                // A job owned by the background path is not handed to the front end;
+                // otherwise coming back to the foreground prints it twice.
+                if (backgroundClaims.contains(o.optString("filename"))) continue;
                 // 第一份打成功之后,同内容的其余副本还排在队列里,但它们已经不该再
                 // 打了 —— 前端每次轮询都重新拉队列,正是靠这里把它们滤掉。
                 //
@@ -572,7 +717,11 @@ public class ShotStore {
 
     private JSONArray pendingFilenames() {
         JSONArray arr = new JSONArray();
-        for (JSONObject o : pending) arr.put(o.optString("filename"));
+        for (JSONObject o : pending) {
+            if (!backgroundClaims.contains(o.optString("filename"))) {
+                arr.put(o.optString("filename"));
+            }
+        }
         return arr;
     }
 
@@ -585,6 +734,12 @@ public class ShotStore {
      */
     public boolean ack(String filename, boolean ok) {
         synchronized (lock) {
+            // 不管成功失败,这条任务的认领都结束了。失败时任务可能已经不在队列里,
+            // 这里先清掉,免得一个陈旧的 claim 永久挡住同名的重试。
+            //
+            // Either way the claim is over. The job may already be gone on failure, so
+            // clear the claim first; a stale claim would otherwise hide a retry forever.
+            backgroundClaims.remove(filename);
             for (int i = 0; i < pending.size(); i++) {
                 JSONObject o = pending.get(i);
                 if (!filename.equals(o.optString("filename"))) continue;
@@ -615,6 +770,7 @@ public class ShotStore {
     public void clearQueue() {
         synchronized (lock) {
             pending.clear();
+            backgroundClaims.clear();
         }
     }
 

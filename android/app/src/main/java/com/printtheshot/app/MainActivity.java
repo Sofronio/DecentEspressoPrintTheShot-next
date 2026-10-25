@@ -6,6 +6,7 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Base64;
 import android.util.Log;
 import android.webkit.WebView;
 
@@ -13,11 +14,16 @@ import androidx.core.content.ContextCompat;
 
 import com.getcapacitor.Bridge;
 import com.getcapacitor.BridgeActivity;
+import com.printtheshot.printer.BluetoothPrinter;
 import com.printtheshot.printer.BluetoothPrinterBridge;
 import com.printtheshot.printer.PrintTheShotPrinterPlugin;
 import com.printtheshot.printer.PrinterService;
 import com.printtheshot.server.DeviceInfo;
 import com.printtheshot.server.ServerHolder;
+
+import org.json.JSONObject;
+
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * App 入口 Activity / the app's entry activity
@@ -75,6 +81,14 @@ public class MainActivity extends BridgeActivity {
         // super.onCreate(), which is when getBridge() stops being null.
         registerWakeHook();
 
+        // App 在后台时的同步打印路径。和 wake 分开:那条是异步泵,页面一冻结
+        // 就卡住;这条用一次同步渲染 + 原生写蓝牙。
+        //
+        // The synchronous background path. Separate from wake: that one is the async
+        // pump and stalls as soon as the page freezes; this one does one synchronous
+        // render and a native Bluetooth write.
+        registerBackgroundPrinter();
+
         // 下载交给系统浏览器 / hand downloads to the system browser
         routeDownloadsToBrowser();
 
@@ -103,7 +117,34 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        ServerHolder.setUiVisible(true);
         startKeepAlive();
+    }
+
+    /**
+     * 界面离开前台后,新任务改走后台上报路径 / once the UI leaves the foreground, new
+     * jobs use the background path.
+     *
+     * 用 onPause 而不是 onStop:锁屏时 onStop 不一定立刻来,而 onPause 会。界面
+     * 部分可见(比如权限弹窗)时也可能触发,但那时后台路径同样能完成打印,只是
+     * 让前端异步泵少一条路;任务认领保证不会两边都打。
+     *
+     * onPause rather than onStop: screen-off does not always call onStop promptly,
+     * while onPause does. A partially visible UI (a permission dialog) may also
+     * trigger it, but the background path still completes the print then; the claim
+     * keeps the two paths from printing the same job twice.
+     */
+    @Override
+    public void onPause() {
+        ServerHolder.setUiVisible(false);
+        super.onPause();
+    }
+
+    @Override
+    public void onDestroy() {
+        ServerHolder.setUiVisible(false);
+        ServerHolder.setBackgroundPrinter(null);
+        super.onDestroy();
     }
 
     /**
@@ -203,9 +244,14 @@ public class MainActivity extends BridgeActivity {
      * 被 Chromium 按「隐藏页面」节流到大约一分钟一次,甚至有的一觉不醒 —— 于是
      * 队列没人取,打印就停了。服务端却始终知道 shot 刚到,所以由它来推一把。
      *
-     * 唤醒走 evaluateJavascript,不走定时器,因此不受节流影响。渲染仍然只发生在
-     * 前端(那张离屏 canvas 在后台照样能画),协议也仍然只在 web/printer.js 里拼 ——
-     * 叫醒的是同一个前端,不是另起一个渲染实现。
+     * **实测(2026-10-25,三星 SM-X210 / Android 16):这条只叫得醒同步入口。**
+     * 页面隐藏后 setTimeout / fetch / Promise 续段会被冻结,evaluateJavascript
+     * 能执行 pumpQueue 的第一段同步代码,但它卡在第一个 `await fetchQueue()`,
+     * 直到 App 回到前台才继续。所以后台打印**不靠这条**:registerBackgroundPrinter()
+     * 走的是「一次同步渲染 + 原生写蓝牙」。wake 只在前台、或页面尚未冻结时让
+     * 打印快一点。
+     *
+     * 渲染和协议仍然只有一份(web/printer.js);后台路径复用的也是它。
      *
      * Why the indirection: in the background the front end's
      * `setInterval(pumpQueue, 5000)` is throttled by Chromium as a hidden page — down
@@ -213,10 +259,16 @@ public class MainActivity extends BridgeActivity {
      * stops. The server, though, always knows a shot has just landed, so it does the
      * poking.
      *
-     * The poke is an evaluateJavascript call, not a timer, so throttling does not
-     * apply. Rendering still happens only in the front end — that offscreen canvas
-     * draws fine in the background — and the protocol is still assembled only in
-     * web/printer.js. It wakes the same front end; it does not add a second renderer.
+     * **Measured (SM-X210 / Android 16, 2026-10-25): the poke only runs the synchronous
+     * entry.** Once the page is hidden, setTimeout / fetch / promise continuations are
+     * frozen, and pumpQueue stalls on its first `await fetchQueue()` until the app is
+     * foregrounded. Background printing therefore does **not** rely on this hook:
+     * registerBackgroundPrinter() uses one synchronous render plus a native Bluetooth
+     * write. wake only makes printing a little faster in the foreground, or before the
+     * page has frozen.
+     *
+     * There is still exactly one renderer and one protocol (web/printer.js); the
+     * background path reuses them.
      */
     private void registerWakeHook() {
         ServerHolder.setWakeWebView(() -> {
@@ -233,6 +285,111 @@ public class MainActivity extends BridgeActivity {
             // covers being called from anywhere else.
             webView.post(() -> webView.evaluateJavascript(PUMP_JS, null));
         });
+    }
+
+    /**
+     * 注册后台同步打印 / register the synchronous background print path.
+     *
+     * 和 wake 的区别:页面在后台被冻结时,异步的 fetch/await 不会继续,但
+     * evaluateJavascript 注入的**同步**脚本会执行。所以这里一次脚本里完成
+     * 渲染和 ESC/POS 拼装,结果通过回调拿回 Java,再由前台服务直接写蓝牙。
+     *
+     * 绘制的实现仍然只有 web/render.js 和 web/printer.js 这一份;Java 不做版面,
+     * 也不拼 ESC/POS。
+     *
+     * How it differs from wake: a hidden page's async fetch/await never resumes, but a
+     * **synchronous** script injected with evaluateJavascript still runs. So one script
+     * does the render and ESC/POS assembly, the result comes back to Java through the
+     * callback, and the foreground service writes it to Bluetooth. Drawing still lives
+     * only in web/render.js and web/printer.js; Java does neither layout nor ESC/POS.
+     */
+    private void registerBackgroundPrinter() {
+        ServerHolder.setBackgroundPrinter((filename, shotJson, configJson, machineId, done) -> {
+            Bridge bridge = getBridge();
+            WebView webView = bridge == null ? null : bridge.getWebView();
+            if (webView == null) {
+                done.onDone(false, "no webview");
+                return;
+            }
+
+            // 渲染回调如果一直不回来(页面被销毁、脚本异常),到点释放认领,
+            // 让前台路径处理;否则任务会永久躲在 claimed 状态里。
+            //
+            // If the render callback never arrives (dead page, script error), release
+            // the claim on a timer; otherwise the job would stay hidden in "claimed".
+            final AtomicBoolean finished = new AtomicBoolean(false);
+            final Runnable timeout = () -> {
+                if (finished.compareAndSet(false, true)) {
+                    Log.w(TAG, "后台渲染超时 / background render timed out: " + filename);
+                    done.onDone(false, "timeout");
+                }
+            };
+            webView.postDelayed(timeout, 8000);
+
+            // JSON 用 quote 之后交给 JSON.parse:shot 内容里可能有引号、换行、
+            // 甚至 U+2028,直接拼进 JS 会变成语法错误或截断字符串。
+            //
+            // Quote the JSON and parse it inside JS: shot text can contain quotes,
+            // newlines or U+2028, which break a raw splice into the script.
+            String js = "(function(){try{"
+                    + "var shot=JSON.parse(" + JSONObject.quote(shotJson) + ");"
+                    + "var cfg=JSON.parse(" + JSONObject.quote(configJson) + ");"
+                    + "return PrintTheShotPrinter.renderJobSync(shot,{config:cfg,machineId:"
+                    + JSONObject.quote(machineId == null ? "" : machineId) + "});"
+                    + "}catch(e){return 'ERR:'+(e&&e.message||e);}})()";
+
+            webView.post(() -> webView.evaluateJavascript(js, result -> {
+                if (!finished.compareAndSet(false, true)) return;
+                webView.removeCallbacks(timeout);
+
+                String value = decodeJsString(result);
+                if (value == null || value.startsWith("ERR:") || "NOT_READY".equals(value)) {
+                    Log.w(TAG, "后台渲染失败 / background render failed: "
+                            + filename + " — " + value);
+                    done.onDone(false, value == null ? "bad result" : value);
+                    return;
+                }
+
+                final byte[] payload;
+                try {
+                    payload = Base64.decode(value, Base64.DEFAULT);
+                } catch (IllegalArgumentException e) {
+                    done.onDone(false, "bad base64");
+                    return;
+                }
+
+                final BluetoothPrinter printer = BluetoothPrinter.get();
+                if (printer == null) {
+                    done.onDone(false, "printer not ready");
+                    return;
+                }
+                // 蓝牙写在打印线程上,不占 WebView 主线程;前台服务保证进程还活着。
+                // The Bluetooth write runs on the printer thread, off the WebView main
+                // thread; the foreground service keeps the process alive.
+                printer.executor().execute(() -> {
+                    boolean ok = printer.printJob(payload, printer.getDefaultAddress());
+                    String message = ok
+                            ? "sent " + payload.length + " bytes"
+                            : printer.getLastError();
+                    Log.i(TAG, "后台打印 / background print " + filename + ": " + message);
+                    done.onDone(ok, message);
+                });
+            }));
+        });
+    }
+
+    /**
+     * evaluateJavascript 的结果是一个 JSON 字符串字面量,这里把它解出来。
+     * The evaluateJavascript result is a JSON string literal; unwrap it.
+     */
+    private static String decodeJsString(String result) {
+        if (result == null || "null".equals(result)) return null;
+        try {
+            Object value = new org.json.JSONTokener(result).nextValue();
+            return value instanceof String ? (String) value : null;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**

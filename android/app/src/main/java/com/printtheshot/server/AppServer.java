@@ -22,6 +22,7 @@ import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -116,6 +117,55 @@ public class AppServer implements MiniHttpServer.Handler {
     private final ShotStore store;
     private final String version;
 
+    // ---------------------------------------------------------------- 设置
+    // ---------------------------------------------------------------- settings
+    //
+    // 界面上「禁用打印」「禁用豆子信息」两个开关的状态。存 SharedPreferences 而
+    // 不是内存里:用户按下去是希望它一直有效,重启 App 就忘掉的话,他又会看到
+    // 新数据自己打出来,而那正是他刚刚关掉的东西。
+    //
+    // The two toggles on the status card ("disable printing", "disable bean info").
+    // Persisted rather than kept in memory: the user pressed it expecting it to stay
+    // off, and forgetting it on the next launch means new shots print themselves
+    // again — the exact thing that was switched off.
+    // 包内可见:ShotStore 自己读队列超时,取队列时顺手清理,不需要每次调用都
+    // 把配置传进来。两条路径共用同一个键,免得两边各写一个字符串而慢慢走偏。
+    //
+    // Package-visible: ShotStore reads the queue timeout itself so it can prune on
+    // every queue read without the setting being threaded through each call. Both
+    // sides share one key rather than each spelling it out and drifting apart.
+    static final String PREFS = "pts_prefs";
+    private static final String KEY_PRINT_ENABLED = "print_enabled";
+    private static final String KEY_BEAN_INFO_ENABLED = "bean_info_enabled";
+    static final String KEY_QUEUE_TIMEOUT_MIN = "queue_timeout_min";
+
+    /** 待打印任务超时默认值(分钟)/ default pending-print timeout, in minutes. */
+    static final int QUEUE_TIMEOUT_MIN_DEFAULT = 3;
+
+    private boolean printEnabled() {
+        return settingBool(KEY_PRINT_ENABLED, true);
+    }
+
+    private boolean beanInfoEnabled() {
+        return settingBool(KEY_BEAN_INFO_ENABLED, true);
+    }
+
+    private boolean settingBool(String key, boolean fallback) {
+        return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(key, fallback);
+    }
+
+    private void setSettingBool(String key, boolean value) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(key, value).apply();
+    }
+
+    private int settingInt(String key, int fallback) {
+        return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(key, fallback);
+    }
+
+    private void setSettingInt(String key, int value) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt(key, value).apply();
+    }
+
     /**
      * 有新 shot 入队时叫醒 WebView 去渲染 / poke the WebView when a shot is queued.
      *
@@ -126,6 +176,12 @@ public class AppServer implements MiniHttpServer.Handler {
      * 注意 Capacitor 本身不是元凶:它的 keepRunning 默认为 true,不会调
      * pauseTimers()。冻结来自浏览器的隐藏页面节流。
      *
+     * **实测(2026-10-25,三星 SM-X210 / Android 16):这一推只能执行同步入口。**
+     * 隐藏页面的 setTimeout / fetch / Promise 续段会被冻结,前端会卡在 pumpQueue 的
+     * 第一个 await,直到 App 回到前台。所以后台打印改由 handleUpload 里的
+     * startBackgroundPrint() 接手:一次同步渲染 + 原生写蓝牙;这一推只在前台/
+     * 页面尚未冻结时有用。
+     *
      * Why: the front end's `setInterval(pumpQueue, 5000)` is throttled once the app
      * goes to the background — Chromium throttles timers on hidden pages, down to
      * roughly once a minute, and sometimes not at all. The server, however, *always*
@@ -134,6 +190,13 @@ public class AppServer implements MiniHttpServer.Handler {
      *
      * Capacitor is not the culprit: its keepRunning preference defaults to true, so
      * it never calls pauseTimers(). The freezing comes from hidden-page throttling.
+     *
+     * **Measured (SM-X210 / Android 16, 2026-10-25): the poke only runs the
+     * synchronous entry.** A hidden page's setTimeout / fetch / promise continuations
+     * are frozen, so the front end stalls on pumpQueue's first await until the app is
+     * foregrounded again. Background printing is handled by startBackgroundPrint()
+     * instead (one synchronous render plus a native Bluetooth write); this poke only
+     * helps in the foreground, or before the page freezes.
      */
     private final Runnable wake;
 
@@ -326,21 +389,38 @@ public class AppServer implements MiniHttpServer.Handler {
         }
 
         try {
-            JSONObject meta = store.save(payload, machineId);
+            JSONObject meta = store.save(payload, machineId, printEnabled());
+            String filename = meta.optString("filename");
 
-            // save() 里已经把这条挂进了待打印队列,所以现在就叫醒前端 —— 这正是
-            // 「App 在后台也能打印」的那一下。前台时它只是让打印快了几秒。
+            // 界面不可见时走同步后台路径。**先认领再叫醒**:认领之后前端看不到这条,
+            // 即使页面稍后恢复也不会再打一遍。前台请求仍走原来的异步泵(它工作正常)。
             //
-            // save() has already queued this one, so poke the front end now. This is
-            // precisely what makes printing work while the app is in the background;
-            // in the foreground it merely makes printing a few seconds quicker.
-            wakeFrontEnd();
+            // When the UI is not visible, use the synchronous background path. **Claim
+            // before poking**: the front end then cannot see the job, so it will not
+            // print it again after the page resumes. Foreground uploads keep using the
+            // asynchronous pump, which still works there.
+            boolean background = printEnabled()
+                    && !filename.isEmpty()
+                    && !ServerHolder.isUiVisible()
+                    && store.claimForBackgroundPrint(filename);
+
+            if (background) {
+                startBackgroundPrint(filename, new String(payload, StandardCharsets.UTF_8), machineId);
+            } else {
+                // save() 里已经把这条挂进了待打印队列,所以现在就叫醒前端。前台时这
+                // 只是让打印快了几秒;后台时这条同步泵会被冻结,由上面的路径接手。
+                //
+                // save() has already queued this one, so poke the front end. In the
+                // foreground this only makes printing a few seconds quicker; in the
+                // background that async pump is frozen, and the path above owns it.
+                wakeFrontEnd();
+            }
 
             JSONObject out = new JSONObject();
             out.put("status", "success");
             out.put("id", meta.optString("timestamp"));
             out.put("message", "Shot data received and saved as " + meta.optString("filename"));
-            out.put("auto_printed", false);   // 由前端取走队列后打印 / the front end drains the queue and prints
+            out.put("auto_printed", background);   // 后台同步路径已接手 / the background path took it
             out.put("filename", meta.optString("filename"));
             return MiniHttpServer.Response.json(200, out.toString());
         } catch (Exception e) {
@@ -351,6 +431,71 @@ public class AppServer implements MiniHttpServer.Handler {
                 out.put("message", "不是合法的 JSON / not valid JSON: " + e.getMessage());
             } catch (Exception ignored) { }
             return MiniHttpServer.Response.json(400, out.toString());
+        }
+    }
+
+    /**
+     * 把一条已认领的任务交给后台同步打印 / hand a claimed job to the synchronous
+     * background printer.
+     *
+     * 超时保护:回调如果不回来(WebView 已销毁、脚本异常),认领会永远挂着,
+     * 这条任务就永远对前端不可见。到点释放,让前台路径接手。
+     *
+     * Timeout guard: if the callback never arrives (dead WebView, script error), the
+     * claim would hang forever and the job would stay invisible to the front end.
+     * Release it on a timer so the foreground path can take over.
+     */
+    private void startBackgroundPrint(String filename, String shotJson, String machineId) {
+        final AtomicBoolean finished = new AtomicBoolean(false);
+        final Runnable timeout = () -> {
+            if (finished.compareAndSet(false, true)) {
+                store.releaseBackgroundClaim(filename);
+                Log.w(TAG, "后台打印超时,交给前台 / background print timed out; leaving it queued: "
+                        + filename);
+                wakeFrontEnd();
+            }
+        };
+        main.postDelayed(timeout, 30_000);
+
+        String configJson;
+        try {
+            configJson = printConfig().toString();
+        } catch (Exception e) {
+            // 配置读不出来就不该硬打:交给前台路径,它稍后会再试。
+            // No config, no print: hand it back to the foreground path to retry.
+            if (finished.compareAndSet(false, true)) {
+                main.removeCallbacks(timeout);
+                store.releaseBackgroundClaim(filename);
+                wakeFrontEnd();
+            }
+            return;
+        }
+
+        boolean started = ServerHolder.printInBackground(
+                filename, shotJson, configJson, machineId,
+                (ok, message) -> {
+                    if (!finished.compareAndSet(false, true)) return;
+                    main.removeCallbacks(timeout);
+                    if (ok) {
+                        // 和前端回执走同一条路:出队 + 记下内容哈希,前台不会重复打印。
+                        // Same path as the front-end ack: remove it and record the hash,
+                        // so the foreground cannot print it again.
+                        store.ack(filename, true);
+                        Log.i(TAG, "后台打印完成 / background print done: " + filename);
+                    } else {
+                        store.releaseBackgroundClaim(filename);
+                        Log.w(TAG, "后台打印失败,留给前台 / background print failed; leaving it queued: "
+                                + filename + " — " + message);
+                        wakeFrontEnd();
+                    }
+                });
+
+        if (!started && finished.compareAndSet(false, true)) {
+            main.removeCallbacks(timeout);
+            store.releaseBackgroundClaim(filename);
+            // 没有可用的 WebView 钩子(服务比界面早启动等),回到原路径。
+            // No WebView hook available (server started before the UI, etc.); fall back.
+            wakeFrontEnd();
         }
     }
 
@@ -405,7 +550,21 @@ public class AppServer implements MiniHttpServer.Handler {
                 out.put("success", true);
                 out.put("filename", f.getName());
                 out.put("lang", req.param("lang", "zh"));
-                out.put("shot", new JSONObject(new String(readFile(f), StandardCharsets.UTF_8)));
+                JSONObject shot = new JSONObject(new String(readFile(f), StandardCharsets.UTF_8));
+                // 机器名只存在于索引里,上传的 JSON 里没有这个字段 —— 而图左下角要印它。
+                // 缩略图、大图、打印三条路都读这个接口,只有自动打印那条手里有机器名
+                // (队列任务带过来的),所以这里补上,别让大图打印出来是 UNKNOWN。
+                //
+                // The machine name lives only in the index — the uploaded JSON has no
+                // such field — and the chart prints it bottom-left. Thumbnails, the
+                // large view and printing all read this endpoint, and only the
+                // auto-print path has the name in hand (it rides on the queue job), so
+                // fill it in here rather than printing "UNKNOWN" from the large view.
+                String machineId = store.machineIdOf(f.getName());
+                if (!machineId.isEmpty()) {
+                    shot.put("machine_id", machineId);
+                }
+                out.put("shot", shot);
                 return json(out.toString());
             }
 
@@ -447,6 +606,19 @@ public class AppServer implements MiniHttpServer.Handler {
                     if (in.has("printer")) {
                         BluetoothPrinter.get().setDefaultAddress(in.optString("printer"));
                     }
+                    // 只接受 1–1440 分钟:0 会让所有任务立刻过期,而静默存下一个坏值
+                    // 只会表现为「怎么不打了」。非法值直接忽略,回当前配置。
+                    //
+                    // Only 1–1440 minutes is accepted: zero would expire everything
+                    // immediately, and silently storing a bad value would only show up
+                    // as "nothing prints any more". Invalid values are ignored and the
+                    // current config is returned.
+                    if (in.has(KEY_QUEUE_TIMEOUT_MIN)) {
+                        int minutes = in.optInt(KEY_QUEUE_TIMEOUT_MIN, 0);
+                        if (minutes >= 1 && minutes <= 1440) {
+                            setSettingInt(KEY_QUEUE_TIMEOUT_MIN, minutes);
+                        }
+                    }
                     JSONObject out = new JSONObject();
                     out.put("success", true);
                     out.put("config", printConfig());
@@ -457,12 +629,27 @@ public class AppServer implements MiniHttpServer.Handler {
             case "/api/print":
                 return handlePrint(req);
 
+            // ---- 两个开关 ----
+            // ---- the two toggles ----
+            //
+            // 这两个端点原来没有,前端 POST 上来落到 default 分支吃一个 404,
+            // 于是状态卡片上那两颗按钮点了什么都不会发生。
+            //
+            // These endpoints used to be missing: the front end's POST fell through to
+            // the default branch and got a 404, so the two buttons on the status card
+            // did nothing at all when pressed.
+            case "/api/settings/print":
+                return setToggle(req, KEY_PRINT_ENABLED, "print_enabled");
+
+            case "/api/settings/beaninfo":
+                return setToggle(req, KEY_BEAN_INFO_ENABLED, "bean_info_enabled");
+
             // ---- 桌面端才有、这里明确返回空结果的功能 ----
             // ---- desktop-only features: return a clear empty result ----
             case "/api/settings": {
                 JSONObject out = new JSONObject();
-                out.put("bean_info_enabled", true);
-                out.put("print_enabled", true);
+                out.put("bean_info_enabled", beanInfoEnabled());
+                out.put("print_enabled", printEnabled());
                 out.put("max_users", 5);
                 return json(out.toString());
             }
@@ -578,8 +765,14 @@ public class AppServer implements MiniHttpServer.Handler {
         out.put("start_time", _startedAt);
         out.put("active_users", Thread.activeCount());
         out.put("max_users", 5);
-        out.put("print_enabled", true);
-        out.put("bean_info_enabled", true);
+        // 这两个是界面上那两颗开关的真实状态,不是常量 —— 以前写死 true,所以
+        // 状态格永远显示 ✅,而开关压根不存在。
+        //
+        // The real state of the two switches on the status card, not constants: they
+        // used to be hardcoded true, so the tiles always showed ✅ while the switches
+        // did not exist at all.
+        out.put("print_enabled", printEnabled());
+        out.put("bean_info_enabled", beanInfoEnabled());
         out.put("language", "zh");
         // 前端据此决定要不要显示「停止服务」按钮 —— Android 上不该显示:
         // 平板上没有终端,但关掉这个服务等于关掉整个 App 的功能,不该给一个一键自杀的入口。
@@ -607,6 +800,36 @@ public class AppServer implements MiniHttpServer.Handler {
         return out;
     }
 
+    /**
+     * POST /api/settings/print 或 /api/settings/beaninfo —— 翻转一个开关。
+     *
+     * 请求体 {"enabled": true|false}。回的形状和 Python 端一致,前端两边共用一套
+     * 代码。请求体里没有 enabled 就什么都不改,并把当前值回过去(和 Python 端一样)。
+     *
+     * POST /api/settings/print or /api/settings/beaninfo — flip one of the toggles.
+     *
+     * Body is {"enabled": true|false}, and the response has the same shape as the
+     * Python server's because the front end runs the same code against both. A body
+     * without "enabled" changes nothing and answers with the current value, matching
+     * the Python side.
+     */
+    private MiniHttpServer.Response setToggle(MiniHttpServer.Request req, String key, String field)
+            throws Exception {
+        if (!"POST".equals(req.method)) {
+            JSONObject out = new JSONObject();
+            out.put("success", false);
+            out.put("message", "POST required");
+            return MiniHttpServer.Response.json(405, out.toString());
+        }
+        JSONObject in = new JSONObject(req.bodyText().isEmpty() ? "{}" : req.bodyText());
+        if (in.has("enabled")) setSettingBool(key, in.optBoolean("enabled", true));
+
+        JSONObject out = new JSONObject();
+        out.put("success", true);
+        out.put(field, settingBool(key, true));
+        return json(out.toString());
+    }
+
     private JSONObject printConfig() throws Exception {
         JSONObject out = new JSONObject();
         BluetoothPrinter bp = BluetoothPrinter.get();
@@ -622,6 +845,19 @@ public class AppServer implements MiniHttpServer.Handler {
         out.put("threshold", 200);
         out.put("rotate", true);
         out.put("raw_supported", true);
+        // 待打印任务超过这么多分钟就不再补打。前端打印设置卡片的那个下拉读它。
+        // Pending jobs older than this are not printed catch-up style any more.
+        // The drop-down on the front end's print settings card reads this.
+        out.put("queue_timeout_min",
+                settingInt(KEY_QUEUE_TIMEOUT_MIN, QUEUE_TIMEOUT_MIN_DEFAULT));
+        // 两个开关也放进来:前端打印那条路(printer.js)读的是这份配置,而「豆子
+        // 信息画不画」是画图参数 —— 屏幕上不画、纸上却画着就自相矛盾了。
+        //
+        // The two toggles ride along: the printing path in printer.js reads this
+        // config, and "does the chart draw bean info" is a rendering parameter —
+        // hiding it on screen while the paper still shows it contradicts itself.
+        out.put("print_enabled", printEnabled());
+        out.put("bean_info_enabled", beanInfoEnabled());
         return out;
     }
 

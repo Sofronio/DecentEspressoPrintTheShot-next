@@ -266,6 +266,13 @@
       // de1xl: the same data disagreeing with itself, which is the worst kind to trace.
       machineId: options.machineId || shot.machine_id || '',
       strings: options.strings || null,
+      // 打出来的那张也要听「豆子信息」开关的:屏幕上不画、纸上却画着,是同一份
+      // 数据两处不一致。标志跟着打印配置走,调用方想盖过它就在 options 里给。
+      //
+      // The printed chart follows the bean-info switch too: hiding it on screen while
+      // the paper still shows it is the same data disagreeing with itself. The flag
+      // comes from the print config, and a caller can override it through options.
+      beanInfo: options.beanInfo !== undefined ? options.beanInfo : (cfg.bean_info_enabled !== false),
       scale: 1
     });
     if (!res.ok) throw new Error('render failed: ' + res.error);
@@ -576,6 +583,69 @@
   }
 
   // =========================================================================
+  // 后台同步渲染 / Background synchronous render
+  // =========================================================================
+
+  /**
+   * 同步渲染并打包一条 shot —— 给「App 在后台」的原生打印路径用。
+   * Render and pack one shot synchronously — for the native background path.
+   *
+   * **这个函数里不能出现 `await`、`fetch`、`setTimeout`。** App 退到后台后,
+   * 隐藏页面的事件循环会被 Chromium 冻结;只有 evaluateJavascript 注入的同步
+   * 片段会执行。数据必须由 Java 提前传进来,结果在同一次脚本执行内返回。
+   *
+   * **No `await`, `fetch` or `setTimeout` may appear here.** Once the app is in the
+   * background, Chromium freezes the hidden page's event loop; only the synchronous
+   * slice injected by evaluateJavascript runs. Java supplies the data up front and
+   * the result comes back within that one execution.
+   *
+   * 返回完整 ESC/POS 任务的 base64;字体没就绪返回 `NOT_READY`;失败返回
+   * `ERR:...`。调用方把后两者都当失败处理。
+   *
+   * Returns a complete ESC/POS job as base64, `NOT_READY` when the font is not
+   * ready, or `ERR:...` on failure. The caller treats both as failure.
+   *
+   * @param {Object} shot   已经取到的 shot JSON / the shot JSON, already loaded
+   * @param {Object} options {config, machineId, lang, strings}
+   */
+  function renderJobSync(shot, options) {
+    options = options || {};
+    try {
+      var cfg = options.config || {};
+      var R = global.PrintTheShotRender;
+      if (!shot || !R || !R.renderShotToCanvas || !R.canvasToBitmap) {
+        return 'ERR:renderer not ready';
+      }
+      // 字体没就绪就交给前台异步路径 —— 回退字体量出来的宽度会让版面走样。
+      // Without the bundled font, measured widths differ and the layout drifts.
+      if (R.isFontReady && !R.isFontReady()) return 'NOT_READY';
+
+      var canvas = getOffscreen();
+      var res = R.renderShotToCanvas(shot, canvas, {
+        lang: options.lang || 'zh',
+        machineId: options.machineId || shot.machine_id || '',
+        strings: options.strings || null,
+        beanInfo: cfg.bean_info_enabled !== false,
+        scale: 1
+      });
+      if (!res || !res.ok) return 'ERR:' + ((res && res.error) || 'render failed');
+
+      var bitmap = R.canvasToBitmap(canvas, {
+        targetWidth: cfg.print_width || 576,
+        rotate: cfg.rotate !== false,
+        threshold: cfg.threshold || 200
+      });
+      var job = buildJob(bitmap, {
+        feedLines: cfg.feed_lines !== undefined ? cfg.feed_lines : 3,
+        cut: cfg.cut !== false
+      });
+      return bytesToBase64(job);
+    } catch (e) {
+      return 'ERR:' + ((e && e.message) || e);
+    }
+  }
+
+  // =========================================================================
   // 导出 / Exports
   // =========================================================================
   var api = {
@@ -592,6 +662,7 @@
     clearShotCache: clearShotCache,
     shotToBitmap: shotToBitmap,
     printShot: printShot,
+    renderJobSync: renderJobSync,
     listPrinters: listPrinters,
     pumpQueue: pumpQueue,
     startAutoPrint: startAutoPrint,
